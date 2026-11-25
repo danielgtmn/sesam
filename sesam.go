@@ -64,6 +64,12 @@ type Config struct {
 	Hooks   Hooks
 	Plugins []Plugin
 
+	// SendEmail delivers mail that sesam and plugins write, e.g. password
+	// reset links. sesam never sends mail itself: the app sends it with
+	// whatever it already uses. Without it, features that need mail are
+	// unavailable (see Auth.CanSendEmail).
+	SendEmail func(ctx context.Context, e Email) error
+
 	// Logger receives internal errors of Handler. Default slog.Default().
 	Logger *slog.Logger
 	// Now is the clock. Default time.Now.

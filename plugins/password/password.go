@@ -44,8 +44,10 @@ const Provider = "credential"
 // Purpose of password reset tokens in the verifications table.
 const resetPurpose = "password-reset"
 
-// Mailer sends the e-mails of this plugin. The app implements it with its
-// own mail setup.
+// Mailer sends the reset e-mail itself, with a text the app writes.
+//
+// Deprecated: set sesam.Config.SendEmail instead; the plugin then writes the
+// e-mail (see Options.ResetEmail) and the app only delivers it.
 type Mailer interface {
 	// SendPasswordReset sends link to u.Email; following it lets the person
 	// choose a new password.
@@ -72,11 +74,17 @@ type Options struct {
 	MaxAttemptsPerClient int
 	AttemptWindow        time.Duration
 
-	// Mailer and ResetURL enable password reset. ResetURL builds the link
-	// from the one-time token, e.g.
+	// ResetURL enables password reset, together with sesam.Config.SendEmail.
+	// It builds the link from the one-time token, e.g.
 	// func(t string) string { return "https://app.example.com/reset?token=" + t }.
-	Mailer   Mailer
 	ResetURL func(token string) string
+	// ResetEmail writes the reset e-mail (To is filled in). Default
+	// DefaultResetEmail: English, plain text and HTML.
+	ResetEmail func(ResetEmailData) sesam.Email
+	// Mailer, if set, sends the reset e-mail instead of Config.SendEmail.
+	//
+	// Deprecated: use sesam.Config.SendEmail.
+	Mailer Mailer
 	// ResetTTL is how long a reset link works. Default 1 hour.
 	ResetTTL time.Duration
 
@@ -139,8 +147,14 @@ func (p *Plugin) Init(a *sesam.Auth) error {
 	if p.o.MinLength > p.o.MaxLength {
 		return errors.New("MinLength is greater than MaxLength")
 	}
-	if (p.o.Mailer == nil) != (p.o.ResetURL == nil) {
-		return errors.New("Mailer and ResetURL must be set together")
+	if p.o.Mailer != nil && p.o.ResetURL == nil {
+		return errors.New("Mailer needs ResetURL")
+	}
+	if p.o.ResetURL != nil && p.o.Mailer == nil && !a.CanSendEmail() {
+		return errors.New("ResetURL needs sesam.Config.SendEmail to deliver the e-mail")
+	}
+	if p.o.ResetEmail == nil {
+		p.o.ResetEmail = DefaultResetEmail
 	}
 	p.a = a
 	return nil
@@ -383,8 +397,11 @@ func (p *Plugin) HasPassword(ctx context.Context, userID string) (bool, error) {
 	return err == nil, err
 }
 
-// ResetEnabled tells whether Mailer and ResetURL are set.
-func (p *Plugin) ResetEnabled() bool { return p.o.Mailer != nil }
+// ResetEnabled tells whether password reset is offered: ResetURL is set and
+// e-mail can be sent. Apps show "forgot password" only then.
+func (p *Plugin) ResetEnabled() bool {
+	return p.o.ResetURL != nil && (p.o.Mailer != nil || p.a.CanSendEmail())
+}
 
 // RequestReset sends a reset link to the e-mail address if it belongs to a
 // user. To not reveal which addresses are known, it returns nil for unknown
@@ -416,10 +433,16 @@ func (p *Plugin) RequestReset(ctx context.Context, email string, m sesam.Session
 	if err != nil {
 		return err
 	}
-	if err := p.o.Mailer.SendPasswordReset(ctx, u, p.o.ResetURL(token)); err != nil {
-		return fmt.Errorf("password: send reset mail: %w", err)
+	link := p.o.ResetURL(token)
+	if p.o.Mailer != nil {
+		if err := p.o.Mailer.SendPasswordReset(ctx, u, link); err != nil {
+			return fmt.Errorf("password: send reset mail: %v", err)
+		}
+		return nil
 	}
-	return nil
+	msg := p.o.ResetEmail(ResetEmailData{User: u, Link: link, ValidFor: p.o.ResetTTL})
+	msg.To = u.Email
+	return p.a.SendEmail(ctx, msg)
 }
 
 // ResetPassword sets a new password with a token from a reset link. The
