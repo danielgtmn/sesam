@@ -31,6 +31,9 @@ concurrency:
 
 jobs:
   tag:
+    # A manual run can pick any branch; only release has passed review and
+    # the required checks, so only release may be tagged.
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
