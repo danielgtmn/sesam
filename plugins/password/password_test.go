@@ -336,3 +336,38 @@ func TestOptionsChecked(t *testing.T) {
 		t.Fatal("reset without mailer")
 	}
 }
+
+func TestEmailOrUsername(t *testing.T) {
+	_, pw, _ := setup(t, memadapter.New(), password.Options{Identifier: password.EmailOrUsername})
+	// Moved from a system with names only: no e-mail address yet.
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Username: "admin"}, pass); err != nil {
+		t.Fatal(err)
+	}
+	both, err := pw.CreateUser(ctx, sesam.NewUser{Username: "anna", Email: "anna@example.com"}, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Email: "mail-only@example.com"}, pass); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Name: "nothing"}, pass); !errors.Is(err, sesam.ErrInvalidInput) {
+		t.Fatalf("user without e-mail and username: %v", err)
+	}
+	for _, id := range []string{"admin", "Anna", "ANNA@example.com", "mail-only@example.com"} {
+		if _, _, _, err := pw.SignIn(ctx, password.Credentials{Identifier: id, Password: pass}, meta); err != nil {
+			t.Errorf("sign-in as %q: %v", id, err)
+		}
+	}
+	// The username and the e-mail address of one account share one limit.
+	for i := range 5 {
+		id := "anna"
+		if i%2 == 1 {
+			id = "anna@example.com"
+		}
+		pw.SignIn(ctx, password.Credentials{Identifier: id, Password: "wrong password"}, sesam.SessionMeta{IP: "192.0.2.50"})
+	}
+	_, _, _, err = pw.SignIn(ctx, password.Credentials{Identifier: "anna@example.com", Password: pass}, sesam.SessionMeta{IP: "192.0.2.51"})
+	if !errors.Is(err, sesam.ErrRateLimited) {
+		t.Fatalf("6th attempt on %s through the other name: %v", both.ID, err)
+	}
+}

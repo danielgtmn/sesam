@@ -201,3 +201,29 @@ func httpFlow(t *testing.T, db adapter.Adapter) {
 		t.Fatalf("unknown field: %d %v", code, body)
 	}
 }
+
+// One login field "name or e-mail address" works whichever JSON field the
+// page sends it in.
+func TestHTTPSignInEitherField(t *testing.T) {
+	pw := password.New(password.Options{Identifier: password.EmailOrUsername})
+	a, err := sesam.New(sesam.Config{Adapter: memadapter.New(), BaseURL: "http://localhost", Plugins: []sesam.Plugin{pw}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Username: "anna", Email: "anna@example.com"}, pass); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(a.Handler())
+	defer srv.Close()
+	c := &client{t: t, c: srv.Client(), base: srv.URL, origin: "http://localhost"}
+	for _, body := range []map[string]string{
+		{"username": "anna", "password": pass},
+		{"username": "anna@example.com", "password": pass},
+		{"email": "anna@example.com", "password": pass},
+		{"email": "ANNA", "password": pass},
+	} {
+		if code, out := c.do("POST", "/api/auth/sign-in", body); code != 200 {
+			t.Errorf("%v: %d %v", body, code, out)
+		}
+	}
+}
