@@ -14,6 +14,7 @@
 | `Cookie.Name` | `sesam_session` | Name of the session cookie (`__Host-` is added with https). |
 | `Cookie.SameSite` | `Lax` | `SameSite` of the cookie. `Strict` is stricter, but a link from another site then arrives signed out. |
 | `ClientIP` | host of `RemoteAddr` | Returns the client's address, for attempt limits and the session list. **Set it when the app runs behind a proxy**, reading the header your proxy sets, or all clients share one limit. |
+| `SendEmail` | none | `func(ctx, sesam.Email) error` that delivers mail sesam and plugins write (password reset links, later e-mail confirmation). **sesam never sends mail itself**: your app delivers it with whatever it already uses (its mail server, an API, a queue). `Email` has `To`, `Subject`, `Text` and `HTML` (may be empty). Without it, features that need mail are not offered; `auth.CanSendEmail()` tells. An error you return is logged, never shown to the person. |
 | `Hooks` | none | See below. |
 | `Plugins` | none | Each plugin once. |
 | `Logger` | `slog.Default()` | Receives internal errors of the endpoints. |

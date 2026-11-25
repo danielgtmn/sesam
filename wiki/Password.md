@@ -19,15 +19,25 @@ pw := password.New(password.Options{
 | `MaxAttemptsPerName` | 5 | Failed sign-ins for one account within `AttemptWindow` (its e-mail address and username count together); then sign-in to it is refused, from every address, until the window ends. |
 | `MaxAttemptsPerClient` | 20 | Sign-in attempts from one client address within the window, for any names. |
 | `AttemptWindow` | 15 minutes | |
-| `Mailer`, `ResetURL` | none | Both together enable "forgot password". `ResetURL(token)` builds the link to your page, which then posts the token and the new password to `/reset-password`. |
+| `ResetURL` | none | Enables "forgot password", together with `sesam.Config.SendEmail`. `ResetURL(token)` builds the link to your page, which then posts the token and the new password to `/reset-password`. |
+| `ResetEmail` | `DefaultResetEmail` | `func(password.ResetEmailData) sesam.Email` that writes the mail, e.g. in another language. It gets the user, the link and how long it works; the recipient is filled in. The default is English, plain text and HTML. |
 | `ResetTTL` | 1 hour | How long a reset link works. |
+| `Mailer` | none | Deprecated: a `SendPasswordReset(ctx, user, link)` interface that sends the mail with your own text. Use `Config.SendEmail` (and `ResetEmail` for the text). |
 | `HashConcurrency` | 4 | Passwords hashed at the same time (64 MiB each). |
 
 ```go
-type Mailer interface {
-    SendPasswordReset(ctx context.Context, u sesam.User, link string) error
-}
+auth, err := sesam.New(sesam.Config{
+    …,
+    SendEmail: func(ctx context.Context, e sesam.Email) error {
+        return myMail.Send(ctx, e.To, e.Subject, e.Text, e.HTML) // your app delivers
+    },
+    Plugins: []sesam.Plugin{password.New(password.Options{
+        ResetURL: func(t string) string { return "https://app.example.com/reset?token=" + t },
+    })},
+})
 ```
+
+`pw.ResetEnabled()` tells whether "forgot password" is offered, so the app shows the link only then. Reset links go to the e-mail address; a user with only a username cannot get one.
 
 ## Name or e-mail address
 
@@ -45,6 +55,7 @@ With `password.EmailOrUsername`, a sign-in form can have one field "name or e-ma
 | `SetPasswordHash(ctx, userID, hash)` | Stores an existing argon2id hash, to move users from another system without resetting passwords. Hashes from gpanel work as they are. |
 | `HasPassword(ctx, userID)` | |
 | `RequestReset(ctx, email, meta)` / `ResetPassword(ctx, token, password)` | The "forgot password" flow. |
+| `ResetEnabled()` | Whether "forgot password" is offered. |
 | `ValidatePassword(pw)` | The length check, for forms. |
 
 `meta` is `auth.Meta(r)`: the client's address and browser, for the attempt limit and the session list. Without an address (empty `meta.IP`), only the per-name limit applies.

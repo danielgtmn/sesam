@@ -23,11 +23,10 @@ import (
 	"github.com/danielgtmn/sesam/plugins/password"
 )
 
-// logMailer prints reset links instead of sending them.
-type logMailer struct{}
-
-func (logMailer) SendPasswordReset(_ context.Context, u sesam.User, link string) error {
-	log.Printf("password reset for %s: %s", u.Email, link)
+// logEmail prints mails instead of sending them. A real app delivers them
+// with whatever it already uses for mail.
+func logEmail(_ context.Context, e sesam.Email) error {
+	log.Printf("e-mail to %s: %s\n%s", e.To, e.Subject, e.Text)
 	return nil
 }
 
@@ -46,10 +45,9 @@ func main() {
 	}
 	base := "http://" + *addr
 	pw := password.New(password.Options{
-		Mailer:   logMailer{},
 		ResetURL: func(token string) string { return base + "/reset?token=" + token },
 	})
-	auth, err := sesam.New(sesam.Config{Adapter: store, BaseURL: base, Plugins: []sesam.Plugin{pw}})
+	auth, err := sesam.New(sesam.Config{Adapter: store, BaseURL: base, SendEmail: logEmail, Plugins: []sesam.Plugin{pw}})
 	if err != nil {
 		log.Fatal(err)
 	}

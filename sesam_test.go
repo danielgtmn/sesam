@@ -476,3 +476,26 @@ func TestMiddleware(t *testing.T) {
 		t.Fatalf("cross-site POST with cookie: %d", rec.Code)
 	}
 }
+
+func TestSendEmail(t *testing.T) {
+	a, _ := newAuth(t, nil)
+	if a.CanSendEmail() {
+		t.Fatal("CanSendEmail without SendEmail")
+	}
+	if err := a.SendEmail(ctx, sesam.Email{To: "a@example.com", Subject: "s", Text: "t"}); !errors.Is(err, sesam.ErrEmailUnavailable) {
+		t.Fatalf("without SendEmail: %v", err)
+	}
+	var got []sesam.Email
+	a, _ = newAuth(t, func(c *sesam.Config) {
+		c.SendEmail = func(_ context.Context, e sesam.Email) error { got = append(got, e); return nil }
+	})
+	if !a.CanSendEmail() {
+		t.Fatal("CanSendEmail false")
+	}
+	if err := a.SendEmail(ctx, sesam.Email{To: "a@example.com", Subject: "s"}); err == nil {
+		t.Fatal("e-mail without text accepted")
+	}
+	if err := a.SendEmail(ctx, sesam.Email{To: "a@example.com", Subject: "s", Text: "t"}); err != nil || len(got) != 1 {
+		t.Fatalf("send: %v, %d", err, len(got))
+	}
+}
