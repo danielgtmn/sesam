@@ -307,6 +307,13 @@ func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta)
 	if err := p.a.ResetLimit(ctx, nameKey); err != nil {
 		return fail(err)
 	}
+	// Only failures count against the client address: many people may
+	// sign in from one address.
+	if m.IP != "" {
+		if err := p.a.UndoLimit(ctx, "password:sign-in:client:"+m.IP); err != nil {
+			return fail(err)
+		}
+	}
 	token, s, err := p.a.SignIn(ctx, u, m)
 	if err != nil {
 		return fail(err)
@@ -314,31 +321,39 @@ func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta)
 	return u, token, s, nil
 }
 
-// ChangePassword sets a new password after checking the current one, and
-// ends the user's other sessions (all except keepSessionID).
-func (p *Plugin) ChangePassword(ctx context.Context, userID, current, next, keepSessionID string) error {
+// VerifyPassword checks the current password of a signed-in user, e.g.
+// before changing the e-mail address. A wrong password, or a user without
+// one, gives sesam.ErrWrongPassword; failures are limited per user like in
+// ChangePassword and share that limit.
+func (p *Plugin) VerifyPassword(ctx context.Context, userID, password string) error {
 	if err := p.a.Limit(ctx, "password:change:"+userID, p.o.MaxAttemptsPerName, p.o.AttemptWindow); err != nil {
 		return err
 	}
 	acc, err := p.account(ctx, userID)
 	if errors.Is(err, adapter.ErrNotFound) {
-		p.slots.Verify(p.dummy(), current)
+		p.slots.Verify(p.dummy(), password)
 		return sesam.ErrWrongPassword
 	}
 	if err != nil {
 		return err
 	}
-	if len(current) > 4*p.o.MaxLength || !p.slots.Verify(acc.String("password_hash"), current) {
+	if len(password) > 4*p.o.MaxLength || !p.slots.Verify(acc.String("password_hash"), password) {
 		return sesam.ErrWrongPassword
+	}
+	return p.a.ResetLimit(ctx, "password:change:"+userID)
+}
+
+// ChangePassword sets a new password after checking the current one, and
+// ends the user's other sessions (all except keepSessionID).
+func (p *Plugin) ChangePassword(ctx context.Context, userID, current, next, keepSessionID string) error {
+	if err := p.VerifyPassword(ctx, userID, current); err != nil {
+		return err
 	}
 	h, err := p.hash(next)
 	if err != nil {
 		return err
 	}
 	if err := p.storeHash(ctx, userID, h); err != nil {
-		return err
-	}
-	if err := p.a.ResetLimit(ctx, "password:change:"+userID); err != nil {
 		return err
 	}
 	_, err = p.a.RevokeUserSessions(ctx, userID, keepSessionID)
@@ -445,21 +460,21 @@ func (p *Plugin) RequestReset(ctx context.Context, email string, m sesam.Session
 	return p.a.SendEmail(ctx, msg)
 }
 
-// ResetPassword sets a new password with a token from a reset link. The
-// token works once; all sessions of the user end. Following the link proves
-// the person can read the address, so it counts as verified.
-func (p *Plugin) ResetPassword(ctx context.Context, token, password string) error {
+// ResetPassword sets a new password with a token from a reset link and
+// returns the user it belongs to. The token works once; all sessions of the
+// user end. Following the link proves the person can read the address, so
+// it counts as verified.
+func (p *Plugin) ResetPassword(ctx context.Context, token, password string) (sesam.User, error) {
 	if err := p.ValidatePassword(password); err != nil {
-		return err
+		return sesam.User{}, err
 	}
 	userID, err := p.a.ConsumeVerification(ctx, resetPurpose, token)
 	if err != nil {
-		return err
+		return sesam.User{}, err
 	}
 	if err := p.SetPassword(ctx, userID, password); err != nil {
-		return err
+		return sesam.User{}, err
 	}
 	verified := true
-	_, err = p.a.UpdateUser(ctx, userID, sesam.UserUpdate{EmailVerified: &verified})
-	return err
+	return p.a.UpdateUser(ctx, userID, sesam.UserUpdate{EmailVerified: &verified})
 }

@@ -7,7 +7,7 @@ What sesam does, and what remains the app's job.
 - Hashed with **argon2id** (64 MiB, 2 passes, 2 lanes, 16-byte salt). At most `HashConcurrency` hashes run at once, so a flood of sign-ins cannot exhaust memory.
 - Never stored, logged or returned. Overlong inputs are refused before hashing.
 - **Unknown names and wrong passwords** give the same answer and take the same time (a hash is checked either way).
-- **Attempt limits**: 5 failures per name and 20 attempts per client address within 15 minutes by default. They are stored, so they survive restarts and apply across all instances.
+- **Attempt limits**: 5 failures per account and 20 failures per client address within 15 minutes by default; successful sign-ins do not count. They are stored, so they survive restarts and apply across all instances.
 
 ## Sessions
 
