@@ -25,7 +25,7 @@ with the matching status; `error` is a sentence to show, `code` is stable. Too m
 | Method | Path | Body | Answer |
 |---|---|---|---|
 | `POST` | `/sign-up` | `{"email", "username", "name", "password"}` | `201 {"user", "session"}`, sets the cookie; `403 sign_up_disabled`, `409 email_taken` / `username_taken`, `400 invalid_input` |
-| `POST` | `/sign-in` | `{"email", "password"}` or `{"username", "password"}` | `200 {"user", "session"}`, sets the cookie; `401 invalid_credentials`, `429` |
+| `POST` | `/sign-in` | `{"email", "password"}` or `{"username", "password"}` (with `EmailOrUsername`, either field may hold either) | `200 {"user", "session"}`, sets the cookie; `401 invalid_credentials`, `429` |
 | `POST` | `/change-password` | `{"current", "new"}` | `204`, signed in; `403 wrong_password` |
 | `POST` | `/request-password-reset` | `{"email"}` | `204`, also for unknown addresses; `404 reset_disabled` without a mailer |
 | `POST` | `/reset-password` | `{"token", "password"}` | `204`; `400 invalid_token` |

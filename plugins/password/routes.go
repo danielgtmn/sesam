@@ -10,6 +10,7 @@ import (
 //
 //	POST /sign-up                 {email, username, name, password}  201, sets the cookie
 //	POST /sign-in                 {email|username, password}         200, sets the cookie
+//	                              (with EmailOrUsername, either field may hold either)
 //	POST /change-password         {current, new}                     204, signed in
 //	POST /request-password-reset  {email}                            204
 //	POST /reset-password          {token, password}                  204
@@ -50,8 +51,14 @@ func (p *Plugin) handleSignIn(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	id := in.Email
-	if p.o.Identifier == Username {
+	switch p.o.Identifier {
+	case Username:
 		id = in.Username
+	case EmailOrUsername:
+		// One field "name or e-mail address" may be sent as either.
+		if id == "" {
+			id = in.Username
+		}
 	}
 	u, token, s, err := p.SignIn(r.Context(), Credentials{Identifier: id, Password: in.Password}, p.a.Meta(r))
 	if err != nil {

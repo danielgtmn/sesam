@@ -13,10 +13,10 @@ pw := password.New(password.Options{
 
 | Option | Default | Meaning |
 |---|---|---|
-| `Identifier` | `Email` | What people sign in with: `password.Email` or `password.Username`. That field is required at sign-up; the other is optional. |
+| `Identifier` | `Email` | What people sign in with: `password.Email` or `password.Username` (that field is required, the other optional), or `password.EmailOrUsername` (either; a user needs at least one). |
 | `DisableSignUp` | false | Refuses `SignUp` and `POST /sign-up`. `CreateUser` still works. |
 | `MinLength`, `MaxLength` | 10, 200 | Password length in characters. |
-| `MaxAttemptsPerName` | 5 | Failed sign-ins for one name within `AttemptWindow`; then sign-in for that name is refused, from every address, until the window ends. |
+| `MaxAttemptsPerName` | 5 | Failed sign-ins for one account within `AttemptWindow` (its e-mail address and username count together); then sign-in to it is refused, from every address, until the window ends. |
 | `MaxAttemptsPerClient` | 20 | Sign-in attempts from one client address within the window, for any names. |
 | `AttemptWindow` | 15 minutes | |
 | `Mailer`, `ResetURL` | none | Both together enable "forgot password". `ResetURL(token)` builds the link to your page, which then posts the token and the new password to `/reset-password`. |
@@ -28,6 +28,10 @@ type Mailer interface {
     SendPasswordReset(ctx context.Context, u sesam.User, link string) error
 }
 ```
+
+## Name or e-mail address
+
+With `password.EmailOrUsername`, a sign-in form can have one field "name or e-mail address": an entry with `@` is looked up as an e-mail address, anything else as a username (usernames cannot contain `@`). Send it as `email` or `username`; both work. This suits apps whose existing users only have names: they keep signing in with their name, and once they add an address they can also use it and reset a forgotten password.
 
 ## Go API
 
