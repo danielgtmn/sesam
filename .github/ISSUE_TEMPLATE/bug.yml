@@ -1,0 +1,35 @@
+name: Bug report
+description: Something does not work as described
+labels: ["type: bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Ideally a short Go test or program.
+      render: go
+  - type: input
+    id: version
+    attributes:
+      label: sesam version
+      description: From your go.mod.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Core (users, sessions, cookies), Password, Database adapters, HTTP endpoints, Docs, Other]
+  - type: input
+    id: database
+    attributes:
+      label: Database and driver
+      placeholder: SQLite with modernc.org/sqlite, Postgres 18 with pgx
