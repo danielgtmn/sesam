@@ -33,6 +33,9 @@ const (
 	Email Identifier = iota
 	// Username: sign in with the username; sign-up requires one.
 	Username
+	// EmailOrUsername: sign in with either; a user needs at least one of
+	// them. Usernames cannot contain "@", so the two are never confused.
+	EmailOrUsername
 )
 
 // Provider is the accounts.provider value of password accounts.
@@ -130,7 +133,7 @@ func (p *Plugin) ID() string             { return "password" }
 func (p *Plugin) Schema() []schema.Table { return nil }
 
 func (p *Plugin) Init(a *sesam.Auth) error {
-	if p.o.Identifier != Email && p.o.Identifier != Username {
+	if p.o.Identifier != Email && p.o.Identifier != Username && p.o.Identifier != EmailOrUsername {
 		return errors.New("invalid Identifier")
 	}
 	if p.o.MinLength > p.o.MaxLength {
@@ -144,14 +147,16 @@ func (p *Plugin) Init(a *sesam.Auth) error {
 }
 
 // Credentials are what a person signs in with. Identifier is the e-mail
-// address or username, depending on Options.Identifier.
+// address or username, depending on Options.Identifier (with
+// EmailOrUsername, either).
 type Credentials struct {
 	Identifier string
 	Password   string
 }
 
 // SignUpInput creates an account. Depending on Options.Identifier, Email or
-// Username is required; the other is optional.
+// Username is required and the other is optional; with EmailOrUsername, one
+// of them is enough.
 type SignUpInput struct {
 	Email    string
 	Username string
@@ -231,7 +236,9 @@ func (p *Plugin) account(ctx context.Context, userID string) (adapter.Row, error
 }
 
 func (p *Plugin) lookup(ctx context.Context, identifier string) (sesam.User, error) {
-	if p.o.Identifier == Email {
+	switch {
+	case p.o.Identifier == Email,
+		p.o.Identifier == EmailOrUsername && strings.Contains(identifier, "@"):
 		return p.a.UserByEmail(ctx, identifier)
 	}
 	return p.a.UserByUsername(ctx, identifier)
@@ -245,11 +252,21 @@ func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta)
 		return sesam.User{}, "", sesam.Session{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(c.Identifier))
-	nameKey := "password:sign-in:name:" + name
 	if m.IP != "" {
 		if err := p.a.Limit(ctx, "password:sign-in:client:"+m.IP, p.o.MaxAttemptsPerClient, p.o.AttemptWindow); err != nil {
 			return fail(err)
 		}
+	}
+	u, err := p.lookup(ctx, name)
+	if err != nil && !errors.Is(err, sesam.ErrNotFound) {
+		return fail(err)
+	}
+	// Failures count per account, so trying the e-mail address and the
+	// username of one account shares a single limit. Unknown names count
+	// on their own.
+	nameKey := "password:sign-in:name:" + name
+	if err == nil {
+		nameKey = "password:sign-in:user:" + u.ID
 	}
 	if err := p.a.Limit(ctx, nameKey, p.o.MaxAttemptsPerName, p.o.AttemptWindow); err != nil {
 		return fail(err)
@@ -258,17 +275,13 @@ func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta)
 		return fail(sesam.ErrInvalidCredentials)
 	}
 	hash := ""
-	u, err := p.lookup(ctx, name)
-	switch {
-	case err == nil:
+	if err == nil {
 		acc, err := p.account(ctx, u.ID)
 		if err == nil {
 			hash = acc.String("password_hash")
 		} else if !errors.Is(err, adapter.ErrNotFound) {
 			return fail(err)
 		}
-	case !errors.Is(err, sesam.ErrNotFound):
-		return fail(err)
 	}
 	if hash == "" {
 		p.slots.Verify(p.dummy(), c.Password)
