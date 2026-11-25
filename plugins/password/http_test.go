@@ -108,15 +108,14 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 }
 
 func httpFlow(t *testing.T, db adapter.Adapter) {
-	m := &mailer{}
+	m := &outbox{}
 	srv := httptest.NewUnstartedServer(nil)
 	srv.Start()
 	defer srv.Close()
 	pw := password.New(password.Options{
-		Mailer:   m,
 		ResetURL: func(tok string) string { return srv.URL + "/reset?token=" + tok },
 	})
-	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: srv.URL, Plugins: []sesam.Plugin{pw}})
+	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: srv.URL, Plugins: []sesam.Plugin{pw}, SendEmail: m.send})
 	if err != nil {
 		t.Fatal(err)
 	}

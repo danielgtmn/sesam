@@ -3,6 +3,7 @@ package password_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -50,18 +51,60 @@ func (m *mailer) token(email string) string {
 	return link[strings.Index(link, "token=")+len("token="):]
 }
 
+// outbox is the app's SendEmail in tests: it keeps what it is given.
+type outbox struct {
+	mu   sync.Mutex
+	sent []sesam.Email
+}
+
+func (o *outbox) send(_ context.Context, e sesam.Email) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sent = append(o.sent, e)
+	return nil
+}
+
+func (o *outbox) last(to string) (sesam.Email, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for i := len(o.sent) - 1; i >= 0; i-- {
+		if o.sent[i].To == to {
+			return o.sent[i], true
+		}
+	}
+	return sesam.Email{}, false
+}
+
+// token returns the token of the last link sent to an address.
+func (o *outbox) token(to string) string {
+	e, _ := o.last(to)
+	i := strings.Index(e.Text, "token=")
+	if i < 0 {
+		return ""
+	}
+	return strings.Fields(e.Text[i+len("token="):])[0]
+}
+
 func setup(t *testing.T, db adapter.Adapter, o password.Options) (*sesam.Auth, *password.Plugin, *clock) {
 	t.Helper()
+	a, pw, c, _ := setupMail(t, db, o)
+	return a, pw, c
+}
+
+// setupMail also sets Config.SendEmail and returns what was sent.
+func setupMail(t *testing.T, db adapter.Adapter, o password.Options) (*sesam.Auth, *password.Plugin, *clock, *outbox) {
+	t.Helper()
 	c := &clock{t: time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)}
+	box := &outbox{}
 	pw := password.New(o)
-	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: "https://app.example.com", Now: c.Now, Plugins: []sesam.Plugin{pw}})
+	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: "https://app.example.com", Now: c.Now, Plugins: []sesam.Plugin{pw}, SendEmail: box.send})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	return a, pw, c
+	return a, pw, c, box
 }
 
 var meta = sesam.SessionMeta{IP: "192.0.2.7", UserAgent: "test"}
@@ -264,7 +307,7 @@ func TestImportedHash(t *testing.T) {
 	}
 }
 
-func TestPasswordReset(t *testing.T) {
+func TestPasswordResetWithDeprecatedMailer(t *testing.T) {
 	m := &mailer{}
 	a, pw, c := setup(t, memadapter.New(), password.Options{
 		Mailer:   m,
@@ -323,7 +366,7 @@ func TestPasswordReset(t *testing.T) {
 func TestOptionsChecked(t *testing.T) {
 	for name, o := range map[string]password.Options{
 		"mailer without url": {Mailer: &mailer{}},
-		"url without mailer": {ResetURL: func(string) string { return "" }},
+		"url without sender": {ResetURL: func(string) string { return "" }},
 		"min above max":      {MinLength: 20, MaxLength: 10},
 	} {
 		_, err := sesam.New(sesam.Config{Adapter: memadapter.New(), BaseURL: "https://a.example", Plugins: []sesam.Plugin{password.New(o)}})
@@ -370,4 +413,94 @@ func TestEmailOrUsername(t *testing.T) {
 	if !errors.Is(err, sesam.ErrRateLimited) {
 		t.Fatalf("6th attempt on %s through the other name: %v", both.ID, err)
 	}
+}
+
+func TestPasswordReset(t *testing.T) {
+	a, pw, c, box := setupMail(t, memadapter.New(), password.Options{
+		Identifier: password.EmailOrUsername,
+		ResetURL:   func(tok string) string { return "https://app.example.com/reset?token=" + tok },
+	})
+	if !pw.ResetEnabled() || !a.CanSendEmail() {
+		t.Fatal("reset not offered with SendEmail and ResetURL")
+	}
+	u, _ := pw.CreateUser(ctx, sesam.NewUser{Username: "anna", Email: "anna@example.com", Name: "Anna <b>"}, pass)
+	if err := pw.RequestReset(ctx, "nobody@example.com", meta); err != nil || len(box.sent) != 0 {
+		t.Fatalf("unknown address: %v, %d mails", err, len(box.sent))
+	}
+	if err := pw.RequestReset(ctx, "Anna@example.com", meta); err != nil {
+		t.Fatal(err)
+	}
+	e, ok := box.last("anna@example.com")
+	if !ok || e.Subject != "Reset your password" {
+		t.Fatalf("mail = %+v", e)
+	}
+	if !strings.Contains(e.Text, "Hello Anna <b>,") || !strings.Contains(e.Text, "1 hour") {
+		t.Fatalf("text:\n%s", e.Text)
+	}
+	// The name is escaped in HTML; the link is in it.
+	if strings.Contains(e.HTML, "<b>") || !strings.Contains(e.HTML, "Anna &lt;b&gt;") || !strings.Contains(e.HTML, `href="https://app.example.com/reset?token=`) {
+		t.Fatalf("html:\n%s", e.HTML)
+	}
+	if err := pw.ResetPassword(ctx, box.token("anna@example.com"), "brand new password"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.User(ctx, u.ID); !got.EmailVerified {
+		t.Fatal("address not verified after reset")
+	}
+	if _, _, _, err := pw.SignIn(ctx, password.Credentials{Identifier: "anna", Password: "brand new password"}, meta); err != nil {
+		t.Fatal(err)
+	}
+	c.Add(time.Hour)
+
+	// A user with only a name cannot get a reset mail.
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Username: "admin"}, pass); err != nil {
+		t.Fatal(err)
+	}
+	n := len(box.sent)
+	if err := pw.RequestReset(ctx, "admin", meta); !errors.Is(err, sesam.ErrInvalidInput) || len(box.sent) != n {
+		t.Fatalf("reset by name: %v", err)
+	}
+}
+
+func TestResetEmailCanBeReplaced(t *testing.T) {
+	_, pw, _, box := setupMail(t, memadapter.New(), password.Options{
+		ResetURL: func(tok string) string { return "https://app.example.com/r/" + tok },
+		ResetTTL: 30 * time.Minute,
+		ResetEmail: func(d password.ResetEmailData) sesam.Email {
+			return sesam.Email{
+				To:      "ignored@example.com", // the plugin sets the recipient
+				Subject: "Passwort zurücksetzen",
+				Text:    fmt.Sprintf("Hallo %s, hier ist dein Link (%v gültig): %s", d.User.Email, d.ValidFor, d.Link),
+			}
+		},
+	})
+	pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass)
+	if err := pw.RequestReset(ctx, "a@example.com", meta); err != nil {
+		t.Fatal(err)
+	}
+	e, ok := box.last("a@example.com")
+	if !ok || e.Subject != "Passwort zurücksetzen" || !strings.Contains(e.Text, "(30m0s gültig): https://app.example.com/r/") || e.HTML != "" {
+		t.Fatalf("mail = %+v", e)
+	}
+}
+
+func TestSendFailureIsInternal(t *testing.T) {
+	pw := password.New(password.Options{ResetURL: func(tok string) string { return "https://x.example/" + tok }})
+	a, err := sesam.New(sesam.Config{
+		Adapter: memadapter.New(), BaseURL: "https://app.example.com", Plugins: []sesam.Plugin{pw},
+		// Even an error that looks like one for people must not reach them.
+		SendEmail: func(context.Context, sesam.Email) error {
+			return sesam.InvalidInput("smtp 554 relay denied for 10.0.0.3")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass)
+	err = pw.RequestReset(ctx, "a@example.com", meta)
+	var e *sesam.Error
+	if err == nil || errors.As(err, &e) {
+		t.Fatalf("err = %v; must be an internal error", err)
+	}
+	_ = a
 }

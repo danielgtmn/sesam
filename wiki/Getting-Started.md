@@ -13,13 +13,14 @@ db, err := sql.Open("sqlite", "app.db?_pragma=foreign_keys(1)&_pragma=busy_timeo
 store, err := sqladapter.New(db, sqladapter.SQLite)
 
 pw := password.New(password.Options{
-    Mailer:   myMailer, // optional: enables "forgot password"
+    // optional, with SendEmail: enables "forgot password"
     ResetURL: func(token string) string { return "https://app.example.com/reset?token=" + token },
 })
 auth, err := sesam.New(sesam.Config{
-    Adapter: store,
-    BaseURL: "https://app.example.com",
-    Plugins: []sesam.Plugin{pw},
+    Adapter:   store,
+    BaseURL:   "https://app.example.com",
+    SendEmail: sendWithMyMail, // func(ctx, sesam.Email) error; sesam never sends mail itself
+    Plugins:   []sesam.Plugin{pw},
 })
 if err := auth.Migrate(ctx); err != nil { … } // creates the auth_* tables
 
