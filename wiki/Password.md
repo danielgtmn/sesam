@@ -50,11 +50,12 @@ With `password.EmailOrUsername`, a sign-in form can have one field "name or e-ma
 | `SignUp(ctx, SignUpInput, meta)` | Creates the account and signs in. |
 | `CreateUser(ctx, NewUser, password)` | Creates an account without signing in (admins, first-run setup). |
 | `SignIn(ctx, Credentials, meta)` | Returns the user, the cookie token and the session. |
+| `VerifyPassword(ctx, userID, password)` | Checks the current password of a signed-in user, e.g. before changing the e-mail address. Limited like `ChangePassword`. |
 | `ChangePassword(ctx, userID, current, new, keepSessionID)` | Checks the current password; ends all other sessions. |
 | `SetPassword(ctx, userID, password)` | Without the old password (admins); ends all sessions. Gives a user without a password one. |
 | `SetPasswordHash(ctx, userID, hash)` | Stores an existing argon2id hash, to move users from another system without resetting passwords. Hashes from gpanel work as they are. |
 | `HasPassword(ctx, userID)` | |
-| `RequestReset(ctx, email, meta)` / `ResetPassword(ctx, token, password)` | The "forgot password" flow. |
+| `RequestReset(ctx, email, meta)` / `ResetPassword(ctx, token, password)` | The "forgot password" flow. `ResetPassword` returns the user, e.g. for an activity log. |
 | `ResetEnabled()` | Whether "forgot password" is offered. |
 | `ValidatePassword(pw)` | The length check, for forms. |
 
@@ -63,7 +64,7 @@ With `password.EmailOrUsername`, a sign-in form can have one field "name or e-ma
 ## Behaviour
 
 - **Unknown names and wrong passwords** give the same error (`invalid_credentials`) and take the same time, so nobody can find out which accounts exist.
-- **Successful sign-in** clears the failed attempts for that name.
+- **Successful sign-in** clears the failed attempts for that name and does not count against the client address, so many people behind one address are not turned away.
 - **Password change** ends all other sessions; **set and reset** end all sessions.
 - **Reset requests** answer the same for known and unknown addresses. At most 3 mails per address and hour. Links work once, and a newer link replaces an older one. Using a link marks the e-mail address as verified.
 - **Hashing** is argon2id (64 MiB, 2 passes, 2 lanes) in the format `$argon2id$v=19$m=65536,t=2,p=2$…`.

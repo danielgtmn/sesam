@@ -52,6 +52,15 @@ func (a *Auth) Limit(ctx context.Context, key string, max int, window time.Durat
 	return errors.New("sesam: rate limit counter is contended")
 }
 
+// UndoLimit takes back one attempt counted by Limit under key, e.g. when
+// it succeeded but earlier failures under key must keep counting (a limit
+// per client address shared by many people). It never goes below zero.
+func (a *Auth) UndoLimit(ctx context.Context, key string) error {
+	_, err := a.db.Update(ctx, TableRateLimits, adapter.Row{"count": adapter.Incr(-1)},
+		adapter.Eq("id", HashToken(key)), adapter.Gt("count", 0))
+	return err
+}
+
 // ResetLimit forgets the attempts under key.
 func (a *Auth) ResetLimit(ctx context.Context, key string) error {
 	_, err := a.db.Delete(ctx, TableRateLimits, adapter.Eq("id", HashToken(key)))

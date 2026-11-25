@@ -109,7 +109,10 @@ jobs:
         run: go test -race -count=1 ./...
       - name: Postgres tests ran
         # A missing database must fail the job, not skip the tests.
-        run: go test -count=1 -run 'TestPostgres|TestHTTPFlow' -v ./... | tee /tmp/pg.log; ! grep -q -- '--- SKIP' /tmp/pg.log
+        run: |
+          set -o pipefail
+          go test -count=1 -run 'TestPostgres|TestHTTPFlow' -v ./... | tee /tmp/pg.log
+          ! grep -q -- '--- SKIP' /tmp/pg.log
 
   lint:
     needs: changes
