@@ -1,0 +1,429 @@
+// Package password lets people sign in with an e-mail address or a
+// username and a password.
+//
+//	pw := password.New(password.Options{Identifier: password.Username, DisableSignUp: true})
+//	auth, _ := sesam.New(sesam.Config{…, Plugins: []sesam.Plugin{pw}})
+//	u, token, s, err := pw.SignIn(ctx, password.Credentials{Identifier: "anna", Password: "…"}, auth.Meta(r))
+//
+// Passwords are hashed with argon2id. Wrong passwords and unknown names give
+// the same error and take the same time. Attempts are limited per name and
+// per client address.
+package password
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/danielgtmn/sesam"
+	"github.com/danielgtmn/sesam/adapter"
+	"github.com/danielgtmn/sesam/internal/argon"
+	"github.com/danielgtmn/sesam/schema"
+)
+
+// Identifier is what people sign in with.
+type Identifier int
+
+const (
+	// Email: sign in with the e-mail address; sign-up requires one.
+	Email Identifier = iota
+	// Username: sign in with the username; sign-up requires one.
+	Username
+)
+
+// Provider is the accounts.provider value of password accounts.
+const Provider = "credential"
+
+// Purpose of password reset tokens in the verifications table.
+const resetPurpose = "password-reset"
+
+// Mailer sends the e-mails of this plugin. The app implements it with its
+// own mail setup.
+type Mailer interface {
+	// SendPasswordReset sends link to u.Email; following it lets the person
+	// choose a new password.
+	SendPasswordReset(ctx context.Context, u sesam.User, link string) error
+}
+
+// Options configure the plugin. The zero value is usable: e-mail sign-in,
+// sign-up allowed, no password reset.
+type Options struct {
+	Identifier Identifier
+	// DisableSignUp refuses SignUp and its endpoint. CreateUser (for
+	// admins and setup) still works.
+	DisableSignUp bool
+
+	// MinLength and MaxLength bound passwords, in characters. Default 10
+	// and 200.
+	MinLength int
+	MaxLength int
+
+	// Failed sign-ins allowed within AttemptWindow per name (default 5) and
+	// per client address (default 20); then further attempts are refused
+	// until the window ends. AttemptWindow defaults to 15 minutes.
+	MaxAttemptsPerName   int
+	MaxAttemptsPerClient int
+	AttemptWindow        time.Duration
+
+	// Mailer and ResetURL enable password reset. ResetURL builds the link
+	// from the one-time token, e.g.
+	// func(t string) string { return "https://app.example.com/reset?token=" + t }.
+	Mailer   Mailer
+	ResetURL func(token string) string
+	// ResetTTL is how long a reset link works. Default 1 hour.
+	ResetTTL time.Duration
+
+	// HashConcurrency bounds how many passwords are hashed at once; each
+	// takes 64 MiB. Default 4.
+	HashConcurrency int
+}
+
+// Plugin is the password plugin. Create it with New.
+type Plugin struct {
+	o     Options
+	a     *sesam.Auth
+	slots argon.Slots
+	dummy func() string
+}
+
+// New returns the plugin.
+func New(o Options) *Plugin {
+	if o.MinLength <= 0 {
+		o.MinLength = 10
+	}
+	if o.MaxLength <= 0 {
+		o.MaxLength = 200
+	}
+	if o.MaxAttemptsPerName <= 0 {
+		o.MaxAttemptsPerName = 5
+	}
+	if o.MaxAttemptsPerClient <= 0 {
+		o.MaxAttemptsPerClient = 20
+	}
+	if o.AttemptWindow <= 0 {
+		o.AttemptWindow = 15 * time.Minute
+	}
+	if o.ResetTTL <= 0 {
+		o.ResetTTL = time.Hour
+	}
+	if o.HashConcurrency <= 0 {
+		o.HashConcurrency = 4
+	}
+	p := &Plugin{o: o, slots: argon.NewSlots(o.HashConcurrency)}
+	// Verified against when a user has no password, so that takes as long
+	// as a wrong password.
+	p.dummy = sync.OnceValue(func() string {
+		h, err := p.slots.Hash(sesam.NewToken())
+		if err != nil {
+			panic(err)
+		}
+		return h
+	})
+	return p
+}
+
+func (p *Plugin) ID() string             { return "password" }
+func (p *Plugin) Schema() []schema.Table { return nil }
+
+func (p *Plugin) Init(a *sesam.Auth) error {
+	if p.o.Identifier != Email && p.o.Identifier != Username {
+		return errors.New("invalid Identifier")
+	}
+	if p.o.MinLength > p.o.MaxLength {
+		return errors.New("MinLength is greater than MaxLength")
+	}
+	if (p.o.Mailer == nil) != (p.o.ResetURL == nil) {
+		return errors.New("Mailer and ResetURL must be set together")
+	}
+	p.a = a
+	return nil
+}
+
+// Credentials are what a person signs in with. Identifier is the e-mail
+// address or username, depending on Options.Identifier.
+type Credentials struct {
+	Identifier string
+	Password   string
+}
+
+// SignUpInput creates an account. Depending on Options.Identifier, Email or
+// Username is required; the other is optional.
+type SignUpInput struct {
+	Email    string
+	Username string
+	Name     string
+	Password string
+}
+
+// ValidatePassword checks a new password against the length rules.
+func (p *Plugin) ValidatePassword(pw string) error {
+	n := utf8.RuneCountInString(pw)
+	if n < p.o.MinLength || n > p.o.MaxLength {
+		return sesam.InvalidInput("The password must be between %d and %d characters long.", p.o.MinLength, p.o.MaxLength)
+	}
+	return nil
+}
+
+func (p *Plugin) hash(pw string) (string, error) {
+	if err := p.ValidatePassword(pw); err != nil {
+		return "", err
+	}
+	return p.slots.Hash(pw)
+}
+
+func (p *Plugin) requireIdentifier(email, username string) error {
+	if p.o.Identifier == Email && strings.TrimSpace(email) == "" {
+		return sesam.InvalidInput("Enter an e-mail address.")
+	}
+	if p.o.Identifier == Username && strings.TrimSpace(username) == "" {
+		return sesam.InvalidInput("Enter a name.")
+	}
+	return nil
+}
+
+// SignUp creates an account with a password and signs it in. It fails with
+// sesam.ErrSignUpDisabled if Options.DisableSignUp is set.
+func (p *Plugin) SignUp(ctx context.Context, in SignUpInput, m sesam.SessionMeta) (sesam.User, string, sesam.Session, error) {
+	if p.o.DisableSignUp {
+		return sesam.User{}, "", sesam.Session{}, sesam.ErrSignUpDisabled
+	}
+	u, err := p.CreateUser(ctx, sesam.NewUser{Email: in.Email, Username: in.Username, Name: in.Name}, in.Password)
+	if err != nil {
+		return sesam.User{}, "", sesam.Session{}, err
+	}
+	token, s, err := p.a.SignIn(ctx, u, m)
+	if err != nil {
+		return sesam.User{}, "", sesam.Session{}, err
+	}
+	return u, token, s, nil
+}
+
+// CreateUser creates a user with a password without signing in, e.g. for
+// an admin or the first-run setup. It works even with DisableSignUp.
+func (p *Plugin) CreateUser(ctx context.Context, nu sesam.NewUser, password string) (sesam.User, error) {
+	if err := p.requireIdentifier(nu.Email, nu.Username); err != nil {
+		return sesam.User{}, err
+	}
+	h, err := p.hash(password)
+	if err != nil {
+		return sesam.User{}, err
+	}
+	return p.a.CreateUserTx(ctx, nu, func(tx adapter.Adapter, u sesam.User) error {
+		return p.createAccount(ctx, tx, u.ID, h)
+	})
+}
+
+func (p *Plugin) createAccount(ctx context.Context, db adapter.Adapter, userID, hash string) error {
+	now := adapter.NormalizeTime(p.a.Now())
+	return db.Create(ctx, sesam.TableAccounts, adapter.Row{
+		"id": sesam.NewID(), "user_id": userID, "provider": Provider, "provider_account_id": userID,
+		"password_hash": hash, "created_at": now, "updated_at": now,
+	})
+}
+
+func (p *Plugin) account(ctx context.Context, userID string) (adapter.Row, error) {
+	return p.a.Adapter().FindOne(ctx, sesam.TableAccounts,
+		adapter.Eq("provider", Provider), adapter.Eq("provider_account_id", userID))
+}
+
+func (p *Plugin) lookup(ctx context.Context, identifier string) (sesam.User, error) {
+	if p.o.Identifier == Email {
+		return p.a.UserByEmail(ctx, identifier)
+	}
+	return p.a.UserByUsername(ctx, identifier)
+}
+
+// SignIn checks the credentials and creates a session. Wrong or unknown
+// credentials give sesam.ErrInvalidCredentials; too many attempts a
+// *sesam.RateLimitError.
+func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta) (sesam.User, string, sesam.Session, error) {
+	fail := func(err error) (sesam.User, string, sesam.Session, error) {
+		return sesam.User{}, "", sesam.Session{}, err
+	}
+	name := strings.ToLower(strings.TrimSpace(c.Identifier))
+	nameKey := "password:sign-in:name:" + name
+	if m.IP != "" {
+		if err := p.a.Limit(ctx, "password:sign-in:client:"+m.IP, p.o.MaxAttemptsPerClient, p.o.AttemptWindow); err != nil {
+			return fail(err)
+		}
+	}
+	if err := p.a.Limit(ctx, nameKey, p.o.MaxAttemptsPerName, p.o.AttemptWindow); err != nil {
+		return fail(err)
+	}
+	if len(c.Password) > 4*p.o.MaxLength {
+		return fail(sesam.ErrInvalidCredentials)
+	}
+	hash := ""
+	u, err := p.lookup(ctx, name)
+	switch {
+	case err == nil:
+		acc, err := p.account(ctx, u.ID)
+		if err == nil {
+			hash = acc.String("password_hash")
+		} else if !errors.Is(err, adapter.ErrNotFound) {
+			return fail(err)
+		}
+	case !errors.Is(err, sesam.ErrNotFound):
+		return fail(err)
+	}
+	if hash == "" {
+		p.slots.Verify(p.dummy(), c.Password)
+		return fail(sesam.ErrInvalidCredentials)
+	}
+	if !p.slots.Verify(hash, c.Password) {
+		return fail(sesam.ErrInvalidCredentials)
+	}
+	if err := p.a.ResetLimit(ctx, nameKey); err != nil {
+		return fail(err)
+	}
+	token, s, err := p.a.SignIn(ctx, u, m)
+	if err != nil {
+		return fail(err)
+	}
+	return u, token, s, nil
+}
+
+// ChangePassword sets a new password after checking the current one, and
+// ends the user's other sessions (all except keepSessionID).
+func (p *Plugin) ChangePassword(ctx context.Context, userID, current, next, keepSessionID string) error {
+	if err := p.a.Limit(ctx, "password:change:"+userID, p.o.MaxAttemptsPerName, p.o.AttemptWindow); err != nil {
+		return err
+	}
+	acc, err := p.account(ctx, userID)
+	if errors.Is(err, adapter.ErrNotFound) {
+		p.slots.Verify(p.dummy(), current)
+		return sesam.ErrWrongPassword
+	}
+	if err != nil {
+		return err
+	}
+	if len(current) > 4*p.o.MaxLength || !p.slots.Verify(acc.String("password_hash"), current) {
+		return sesam.ErrWrongPassword
+	}
+	h, err := p.hash(next)
+	if err != nil {
+		return err
+	}
+	if err := p.storeHash(ctx, userID, h); err != nil {
+		return err
+	}
+	if err := p.a.ResetLimit(ctx, "password:change:"+userID); err != nil {
+		return err
+	}
+	_, err = p.a.RevokeUserSessions(ctx, userID, keepSessionID)
+	return err
+}
+
+// SetPassword sets a password without knowing the old one (admins, reset)
+// and ends all sessions of the user. A user without a password gets one.
+func (p *Plugin) SetPassword(ctx context.Context, userID, password string) error {
+	h, err := p.hash(password)
+	if err != nil {
+		return err
+	}
+	return p.setHash(ctx, userID, h)
+}
+
+// SetPasswordHash stores an existing argon2id hash in the format
+// "$argon2id$v=19$m=…,t=…,p=…$salt$key", e.g. when moving users from
+// another system, and ends all sessions of the user.
+func (p *Plugin) SetPasswordHash(ctx context.Context, userID, hash string) error {
+	if !argon.WellFormed(hash) {
+		return sesam.InvalidInput("This is not a password hash that can be imported.")
+	}
+	return p.setHash(ctx, userID, hash)
+}
+
+func (p *Plugin) setHash(ctx context.Context, userID, h string) error {
+	if _, err := p.a.User(ctx, userID); err != nil {
+		return err
+	}
+	if err := p.storeHash(ctx, userID, h); err != nil {
+		return err
+	}
+	_, err := p.a.RevokeUserSessions(ctx, userID, "")
+	return err
+}
+
+// storeHash updates the password account, or creates it.
+func (p *Plugin) storeHash(ctx context.Context, userID, h string) error {
+	db := p.a.Adapter()
+	n, err := db.Update(ctx, sesam.TableAccounts,
+		adapter.Row{"password_hash": h, "updated_at": adapter.NormalizeTime(p.a.Now())},
+		adapter.Eq("provider", Provider), adapter.Eq("provider_account_id", userID))
+	if err != nil || n > 0 {
+		return err
+	}
+	return p.createAccount(ctx, db, userID, h)
+}
+
+// HasPassword tells whether the user can sign in with a password.
+func (p *Plugin) HasPassword(ctx context.Context, userID string) (bool, error) {
+	_, err := p.account(ctx, userID)
+	if errors.Is(err, adapter.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// ResetEnabled tells whether Mailer and ResetURL are set.
+func (p *Plugin) ResetEnabled() bool { return p.o.Mailer != nil }
+
+// RequestReset sends a reset link to the e-mail address if it belongs to a
+// user. To not reveal which addresses are known, it returns nil for unknown
+// addresses too. Requests are limited per address and per client.
+func (p *Plugin) RequestReset(ctx context.Context, email string, m sesam.SessionMeta) error {
+	if !p.ResetEnabled() {
+		return &sesam.Error{Status: 404, Code: "reset_disabled", Message: "Passwords cannot be reset here."}
+	}
+	e, err := sesam.NormalizeEmail(email)
+	if err != nil {
+		return err
+	}
+	if m.IP != "" {
+		if err := p.a.Limit(ctx, "password:reset:client:"+m.IP, p.o.MaxAttemptsPerClient, time.Hour); err != nil {
+			return err
+		}
+	}
+	if err := p.a.Limit(ctx, "password:reset:email:"+e, 3, time.Hour); err != nil {
+		return err
+	}
+	u, err := p.a.UserByEmail(ctx, e)
+	if errors.Is(err, sesam.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	token, err := p.a.CreateVerification(ctx, resetPurpose, u.ID, p.o.ResetTTL)
+	if err != nil {
+		return err
+	}
+	if err := p.o.Mailer.SendPasswordReset(ctx, u, p.o.ResetURL(token)); err != nil {
+		return fmt.Errorf("password: send reset mail: %w", err)
+	}
+	return nil
+}
+
+// ResetPassword sets a new password with a token from a reset link. The
+// token works once; all sessions of the user end. Following the link proves
+// the person can read the address, so it counts as verified.
+func (p *Plugin) ResetPassword(ctx context.Context, token, password string) error {
+	if err := p.ValidatePassword(password); err != nil {
+		return err
+	}
+	userID, err := p.a.ConsumeVerification(ctx, resetPurpose, token)
+	if err != nil {
+		return err
+	}
+	if err := p.SetPassword(ctx, userID, password); err != nil {
+		return err
+	}
+	verified := true
+	_, err = p.a.UpdateUser(ctx, userID, sesam.UserUpdate{EmailVerified: &verified})
+	return err
+}

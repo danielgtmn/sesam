@@ -1,0 +1,20 @@
+name: Feature request
+description: An idea for sesam
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The task or problem, in your own words. What do you do today instead?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could sesam help?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Core, New plugin, Sign-in with other services, Database adapters, Docs, Other]
