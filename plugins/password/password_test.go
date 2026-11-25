@@ -326,13 +326,13 @@ func TestPasswordResetWithDeprecatedMailer(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok := m.token("a@example.com")
-	if err := pw.ResetPassword(ctx, tok, "short"); !errors.Is(err, sesam.ErrInvalidInput) {
+	if _, err := pw.ResetPassword(ctx, tok, "short"); !errors.Is(err, sesam.ErrInvalidInput) {
 		t.Fatalf("short password: %v", err)
 	}
-	if err := pw.ResetPassword(ctx, tok, "brand new password"); err != nil {
-		t.Fatal(err)
+	if got, err := pw.ResetPassword(ctx, tok, "brand new password"); err != nil || got.ID != u.ID {
+		t.Fatalf("reset: %v %v", got.ID, err)
 	}
-	if err := pw.ResetPassword(ctx, tok, "another password"); !errors.Is(err, sesam.ErrInvalidToken) {
+	if _, err := pw.ResetPassword(ctx, tok, "another password"); !errors.Is(err, sesam.ErrInvalidToken) {
 		t.Fatalf("token used twice: %v", err)
 	}
 	if _, _, err := a.Session(ctx, old); !errors.Is(err, sesam.ErrUnauthenticated) {
@@ -348,7 +348,7 @@ func TestPasswordResetWithDeprecatedMailer(t *testing.T) {
 	// Links expire.
 	pw.RequestReset(ctx, "a@example.com", meta)
 	c.Add(time.Hour + time.Second)
-	if err := pw.ResetPassword(ctx, m.token("a@example.com"), "brand new password 2"); !errors.Is(err, sesam.ErrInvalidToken) {
+	if _, err := pw.ResetPassword(ctx, m.token("a@example.com"), "brand new password 2"); !errors.Is(err, sesam.ErrInvalidToken) {
 		t.Fatalf("expired link: %v", err)
 	}
 	// At most 3 mails per address and hour.
@@ -441,7 +441,7 @@ func TestPasswordReset(t *testing.T) {
 	if strings.Contains(e.HTML, "<b>") || !strings.Contains(e.HTML, "Anna &lt;b&gt;") || !strings.Contains(e.HTML, `href="https://app.example.com/reset?token=`) {
 		t.Fatalf("html:\n%s", e.HTML)
 	}
-	if err := pw.ResetPassword(ctx, box.token("anna@example.com"), "brand new password"); err != nil {
+	if _, err := pw.ResetPassword(ctx, box.token("anna@example.com"), "brand new password"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := a.User(ctx, u.ID); !got.EmailVerified {
@@ -503,4 +503,49 @@ func TestSendFailureIsInternal(t *testing.T) {
 		t.Fatalf("err = %v; must be an internal error", err)
 	}
 	_ = a
+}
+
+// Many people behind one address: successful sign-ins must not use up the
+// client limit, failures still do.
+func TestSuccessfulSignInsDoNotCountAgainstTheClient(t *testing.T) {
+	_, pw, _ := setup(t, memadapter.New(), password.Options{MaxAttemptsPerClient: 3})
+	if _, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass); err != nil {
+		t.Fatal(err)
+	}
+	office := sesam.SessionMeta{IP: "192.0.2.80"}
+	right := password.Credentials{Identifier: "a@example.com", Password: pass}
+	for i := range 10 {
+		if _, _, _, err := pw.SignIn(ctx, right, office); err != nil {
+			t.Fatalf("sign-in %d: %v", i, err)
+		}
+	}
+	wrong := password.Credentials{Identifier: "nobody@example.com", Password: "wrong password"}
+	for range 3 {
+		pw.SignIn(ctx, wrong, office)
+	}
+	if _, _, _, err := pw.SignIn(ctx, right, office); !errors.Is(err, sesam.ErrRateLimited) {
+		t.Fatalf("after 3 failures: %v", err)
+	}
+}
+
+func TestVerifyPassword(t *testing.T) {
+	_, pw, _ := setup(t, memadapter.New(), password.Options{MaxAttemptsPerName: 2})
+	u, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.VerifyPassword(ctx, u.ID, pass); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.VerifyPassword(ctx, u.ID, "wrong password"); !errors.Is(err, sesam.ErrWrongPassword) {
+		t.Fatalf("wrong: %v", err)
+	}
+	if err := pw.VerifyPassword(ctx, "no-such-user", pass); !errors.Is(err, sesam.ErrWrongPassword) {
+		t.Fatalf("unknown user: %v", err)
+	}
+	pw.VerifyPassword(ctx, u.ID, "wrong password")
+	pw.VerifyPassword(ctx, u.ID, "wrong password")
+	if err := pw.VerifyPassword(ctx, u.ID, pass); !errors.Is(err, sesam.ErrRateLimited) {
+		t.Fatalf("after failures: %v", err)
+	}
 }

@@ -345,6 +345,12 @@ func testIncr(t *testing.T, a adapter.Adapter) {
 			t.Errorf("%s: count %d, want %d", id, r.Int("count"), want)
 		}
 	}
+	// Negative steps subtract.
+	_, err = a.Update(ctx, "items", adapter.Row{"count": adapter.Incr(-2)}, adapter.Eq("id", "a"))
+	must(t, err)
+	if r, err := a.FindOne(ctx, "items", adapter.Eq("id", "a")); err != nil || r.Int("count") != 4 {
+		t.Errorf("after Incr(-2): %v %v", r.Int("count"), err)
+	}
 	if _, err := a.Update(ctx, "items", adapter.Row{"title": adapter.Incr(1)}); err == nil {
 		t.Error("Incr on a string accepted")
 	}

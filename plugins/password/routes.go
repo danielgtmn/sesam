@@ -110,7 +110,7 @@ func (p *Plugin) handleReset(w http.ResponseWriter, r *http.Request) error {
 	if err := sesam.ReadJSON(r, &in); err != nil {
 		return err
 	}
-	if err := p.ResetPassword(r.Context(), in.Token, in.Password); err != nil {
+	if _, err := p.ResetPassword(r.Context(), in.Token, in.Password); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

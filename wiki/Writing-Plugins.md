@@ -53,7 +53,7 @@ Conditions: `Eq`, `Ne` (nil tests for NULL), `Lt`, `Lte`, `Gt`, `Gte`, `In`, `Pr
 |---|---|
 | `a.SignIn(ctx, u, meta)` | Runs the sign-in hooks and creates the session; call it once the person proved who they are. |
 | `a.CreateUserTx(ctx, nu, fn)` | Creates a user and runs `fn` in the same transaction (e.g. to add an account). |
-| `a.Limit(ctx, key, max, window)` / `a.ResetLimit` | Stored attempt limits. |
+| `a.Limit(ctx, key, max, window)` / `a.UndoLimit` / `a.ResetLimit` | Stored attempt limits. `UndoLimit` takes back one attempt (a success that must not count), `ResetLimit` forgets them all. |
 | `a.CreateVerification` / `a.ConsumeVerification` | One-time tokens that work exactly once. |
 | `a.AddHooks(sesam.Hooks{…})` | E.g. `BeforeSignIn` to demand a second step. |
 | `sesam.NewID`, `NewToken`, `HashToken` | Random ids, secrets, and the hash to store instead of a secret. |
