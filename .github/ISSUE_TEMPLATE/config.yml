@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/danielgtmn/sesam/discussions
+    about: Ask how something works, or share an idea before it becomes an issue.
+  - name: Report a security problem
+    url: https://github.com/danielgtmn/sesam/security/advisories/new
+    about: Privately, please. Never in a public issue.
+  - name: Documentation
+    url: https://github.com/danielgtmn/sesam/wiki
+    about: Getting started, configuration and how everything works.

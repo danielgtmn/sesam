@@ -1,0 +1,94 @@
+# Releases sesam. A Go module is released by its git tag: once v1.2.3 is
+# pushed, `go get github.com/danielgtmn/sesam@v1.2.3` works. There are no
+# archives to build.
+#
+# Stable releases are made from the long-lived branch release: merge a pull
+# request main -> release (merge commit). The tag job computes the next
+# version from the Conventional Commits since the last v* tag (fix:/perf:
+# patch, feat: minor, feat!: or BREAKING CHANGE: major), pushes the tag
+# v<version>, and the release job publishes a GitHub release with notes
+# listing the merged pull requests. A push without such commits releases
+# nothing.
+#
+# Between releases, apps can use main directly:
+# `go get github.com/danielgtmn/sesam@main` (a pseudo-version).
+#
+# If the release job fails after the tag was pushed, use "Re-run failed
+# jobs": re-running the tag job finds the tag already there.
+name: Release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the tag v<version>
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous-version: ${{ steps.version.outputs.previous-version }}
+      tag-created: ${{ steps.version.outputs.tag-created }}
+    steps:
+      # The full history and all tags to find the last release; the action
+      # pushes the new tag with the credentials checkout leaves behind.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: wemogy/get-release-version-action@ce83cb81cc4a9b120ff773b0f6c7be0d6ce0f9cf # v4.3.7
+        id: version
+        with:
+          prefix: v
+          git-username: github-actions[bot]
+          git-email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      - name: Report
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous-version }}
+          CREATED: ${{ steps.version.outputs.tag-created }}
+        run: |
+          if [ "$CREATED" = true ]; then
+            echo "Releasing v$VERSION (previous: ${PREVIOUS:+v}${PREVIOUS:-none})." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No feat:, fix: or perf: commits since ${PREVIOUS:+v}${PREVIOUS:-the start}; nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.tag-created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: v${{ needs.tag.outputs.version }}
+      PREVIOUS: ${{ needs.tag.outputs.previous-version }}
+    steps:
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION exists already."
+            exit 0
+          fi
+          flags=(--verify-tag --title "$VERSION" --generate-notes --latest)
+          if [ -n "$PREVIOUS" ] && [ "v$PREVIOUS" != "$VERSION" ]; then
+            flags+=(--notes-start-tag "v$PREVIOUS")
+          fi
+          gh release create "$VERSION" "${flags[@]}"
+          echo "Released $VERSION: go get github.com/${GH_REPO}@${VERSION}" | tee -a "$GITHUB_STEP_SUMMARY"

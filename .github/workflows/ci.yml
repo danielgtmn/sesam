@@ -1,0 +1,145 @@
+# Checks every change. The job names (go, lint) are used as required status
+# checks in the branch protection rules; renaming one means updating the
+# rules as well.
+#
+# On pull requests, jobs run only when files they check changed (a skipped
+# job counts as passed for the branch rules). Pushes to main and release,
+# the merge queue and manual runs always run everything. The pull request
+# title check ("commits") is in commits.yml.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, release]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      lint: ${{ steps.filter.outputs.lint }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Decide which checks to run
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          all() { for k in go lint; do echo "$k=true" >> "$GITHUB_OUTPUT"; done; }
+          if [ "$EVENT" = push ] && [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            files="$(git diff --name-only "$BEFORE" "$AFTER")"
+          elif [ "$EVENT" != "pull_request" ]; then
+            echo "No pull request and no previous commit to compare with: running every check."
+            all
+            exit 0
+          else
+            files="$(git diff --name-only "$BASE...$HEAD")"
+          fi
+          echo "Changed files:"
+          echo "$files"
+          # A change to this workflow must prove itself on every job.
+          if grep -qx '.github/workflows/ci.yml' <<<"$files"; then
+            all
+            exit 0
+          fi
+          has() { grep -qE "$1" <<<"$files" && echo true || echo false; }
+          {
+            echo "go=$(has '(\.go$|^go\.(mod|sum)$)')"
+            echo "lint=$(has '(\.sh$|^\.github/workflows/)')"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # The adapter and plugin tests run against it as well (each test in
+      # its own schema). A throwaway database without a password, reachable
+      # only from this job.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SESAM_TEST_POSTGRES: postgres://postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not formatted, run gofmt -w:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Postgres tests ran
+        # A missing database must fail the job, not skip the tests.
+        run: go test -count=1 -run 'TestPostgres|TestHTTPFlow' -v ./... | tee /tmp/pg.log; ! grep -q -- '--- SKIP' /tmp/pg.log
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No shell scripts found."
+            exit 0
+          fi
+          shellcheck --version
+          shellcheck "${scripts[@]}"
+      - name: Script tests
+        run: |
+          for t in scripts/*_test.sh; do
+            echo "::group::$t"
+            "$t"
+            echo "::endgroup::"
+          done
+      - name: actionlint
+        # The preinstalled shellcheck is picked up for the run: blocks.
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
