@@ -4,7 +4,7 @@
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Adapter` | required | Where data is stored, see [[Databases|Databases]]. |
+| `Store` | required | Where data is stored, an `ablage.Store` (SQLite, Postgres or memory), see [[Databases|Databases]]. Without a table prefix, so sesam's tables are named `auth_…`. |
 | `BaseURL` | required | Where the app is reached, e.g. `https://app.example.com`. Its origin may send changing requests. With `https`, cookies are `Secure` and named `__Host-…`. |
 | `BasePath` | `/api/auth` | Where `Handler` is mounted. |
 | `TrustedOrigins` | none | More origins (`scheme://host[:port]`) whose pages may send changing requests, e.g. a dev server `http://localhost:5173`. |

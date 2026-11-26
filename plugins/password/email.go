@@ -6,7 +6,7 @@ import (
 	"html/template"
 	"time"
 
-	"github.com/danielgtmn/sesam"
+	"github.com/danielgtmn/sesam/v2"
 )
 
 // ResetEmailData is what a reset e-mail is built from.

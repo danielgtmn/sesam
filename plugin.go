@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-
-	"github.com/danielgtmn/sesam/schema"
 )
 
 // Plugin adds a way to sign in or other features. Plugins live in
@@ -16,11 +14,12 @@ import (
 type Plugin interface {
 	// ID is unique among the plugins of an Auth, e.g. "password".
 	ID() string
-	// Schema returns the tables the plugin needs, or fields it adds to
-	// existing tables. Called once by New.
-	Schema() []schema.Table
-	// Init is called once by New after all schemas are merged. Plugins keep
-	// the Auth to call its methods later, and may register hooks.
+	// Init is called once by New. Plugins keep the Auth to call its
+	// methods later, may register hooks, and declare the tables they need
+	// on Auth.Store, usually by creating repositories
+	// (ablage.NewRepository); Auth.Migrate creates them. Name tables
+	// "auth_<plugin>_…", and let references to users cascade
+	// (`db:",ref=auth_users,cascade"`), so DeleteUser removes the rows.
 	Init(a *Auth) error
 }
 

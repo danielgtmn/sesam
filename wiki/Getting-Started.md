@@ -1,7 +1,7 @@
 # Getting started
 
 ```sh
-go get github.com/danielgtmn/sesam
+go get github.com/danielgtmn/sesam/v2 github.com/danielgtmn/ablage
 ```
 
 ## A complete app
@@ -10,14 +10,14 @@ go get github.com/danielgtmn/sesam
 
 ```go
 db, err := sql.Open("sqlite", "app.db?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_txlock=immediate")
-store, err := sqladapter.New(db, sqladapter.SQLite)
+store, err := sqlstore.New(db, sqlstore.SQLite) // github.com/danielgtmn/ablage/sqlstore
 
 pw := password.New(password.Options{
     // optional, with SendEmail: enables "forgot password"
     ResetURL: func(token string) string { return "https://app.example.com/reset?token=" + token },
 })
 auth, err := sesam.New(sesam.Config{
-    Adapter:   store,
+    Store:     store,
     BaseURL:   "https://app.example.com",
     SendEmail: sendWithMyMail, // func(ctx, sesam.Email) error; sesam never sends mail itself
     Plugins:   []sesam.Plugin{pw},
@@ -33,7 +33,7 @@ mux.Handle("GET /me", auth.RequireSession(http.HandlerFunc(func(w http.ResponseW
 http.ListenAndServe(":8080", auth.Middleware(mux))
 ```
 
-1. **Open your database** with your driver and wrap it in an adapter ([[Databases|Databases]]).
+1. **Open your database** with your driver and wrap it in a store ([[Databases|Databases]]).
 2. **Create the plugins** you want, here the [[Password|Password]] plugin.
 3. **Create the `Auth`** with `sesam.New`. `BaseURL` is where your app is reached; it decides which pages may send requests and whether cookies are `Secure` ([[Configuration|Configuration]]).
 4. **Migrate** at every start. It only adds what is missing.

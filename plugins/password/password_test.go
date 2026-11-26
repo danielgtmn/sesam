@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielgtmn/sesam"
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/adapters/memadapter"
-	"github.com/danielgtmn/sesam/plugins/password"
+	"github.com/danielgtmn/ablage"
+	"github.com/danielgtmn/ablage/memstore"
+	"github.com/danielgtmn/sesam/v2"
+	"github.com/danielgtmn/sesam/v2/plugins/password"
 )
 
 var ctx = context.Background()
@@ -85,19 +85,19 @@ func (o *outbox) token(to string) string {
 	return strings.Fields(e.Text[i+len("token="):])[0]
 }
 
-func setup(t *testing.T, db adapter.Adapter, o password.Options) (*sesam.Auth, *password.Plugin, *clock) {
+func setup(t *testing.T, db ablage.Store, o password.Options) (*sesam.Auth, *password.Plugin, *clock) {
 	t.Helper()
 	a, pw, c, _ := setupMail(t, db, o)
 	return a, pw, c
 }
 
 // setupMail also sets Config.SendEmail and returns what was sent.
-func setupMail(t *testing.T, db adapter.Adapter, o password.Options) (*sesam.Auth, *password.Plugin, *clock, *outbox) {
+func setupMail(t *testing.T, db ablage.Store, o password.Options) (*sesam.Auth, *password.Plugin, *clock, *outbox) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)}
 	box := &outbox{}
 	pw := password.New(o)
-	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: "https://app.example.com", Now: c.Now, Plugins: []sesam.Plugin{pw}, SendEmail: box.send})
+	a, err := sesam.New(sesam.Config{Store: db, BaseURL: "https://app.example.com", Now: c.Now, Plugins: []sesam.Plugin{pw}, SendEmail: box.send})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ var meta = sesam.SessionMeta{IP: "192.0.2.7", UserAgent: "test"}
 const pass = "a long password"
 
 func TestSignUpAndSignIn(t *testing.T) {
-	a, pw, _ := setup(t, memadapter.New(), password.Options{})
+	a, pw, _ := setup(t, memstore.New(), password.Options{})
 	u, token, _, err := pw.SignUp(ctx, password.SignUpInput{Email: "Anna@Example.com", Name: "Anna", Password: pass}, meta)
 	if err != nil {
 		t.Fatal(err)
@@ -128,8 +128,8 @@ func TestSignUpAndSignIn(t *testing.T) {
 		t.Fatal("no password account")
 	}
 	// The stored hash is argon2id, never the password.
-	acc, _ := a.Adapter().FindOne(ctx, sesam.TableAccounts, adapter.Eq("user_id", u.ID))
-	if h := acc.String("password_hash"); !strings.HasPrefix(h, "$argon2id$") || strings.Contains(h, pass) {
+	acc, _ := a.Accounts().First(ctx, ablage.Query{Where: ablage.Eq("user_id", u.ID)})
+	if h := *acc.PasswordHash; !strings.HasPrefix(h, "$argon2id$") || strings.Contains(h, pass) {
 		t.Fatalf("stored %q", h)
 	}
 
@@ -158,7 +158,7 @@ func TestSignUpAndSignIn(t *testing.T) {
 }
 
 func TestUnknownUserTakesAsLongAsWrongPassword(t *testing.T) {
-	_, pw, _ := setup(t, memadapter.New(), password.Options{MaxAttemptsPerName: 100, MaxAttemptsPerClient: 100})
+	_, pw, _ := setup(t, memstore.New(), password.Options{MaxAttemptsPerName: 100, MaxAttemptsPerClient: 100})
 	if _, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestUnknownUserTakesAsLongAsWrongPassword(t *testing.T) {
 }
 
 func TestSignInLimits(t *testing.T) {
-	_, pw, c := setup(t, memadapter.New(), password.Options{})
+	_, pw, c := setup(t, memstore.New(), password.Options{})
 	if _, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestSignInLimits(t *testing.T) {
 }
 
 func TestUsernameMode(t *testing.T) {
-	a, pw, _ := setup(t, memadapter.New(), password.Options{Identifier: password.Username, DisableSignUp: true})
+	a, pw, _ := setup(t, memstore.New(), password.Options{Identifier: password.Username, DisableSignUp: true})
 	if _, _, _, err := pw.SignUp(ctx, password.SignUpInput{Username: "anna", Password: pass}, meta); !errors.Is(err, sesam.ErrSignUpDisabled) {
 		t.Fatalf("sign-up: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestUsernameMode(t *testing.T) {
 }
 
 func TestChangeAndSetPassword(t *testing.T) {
-	a, pw, _ := setup(t, memadapter.New(), password.Options{})
+	a, pw, _ := setup(t, memstore.New(), password.Options{})
 	u, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass)
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestChangeAndSetPassword(t *testing.T) {
 
 // Users moved from gpanel keep their passwords.
 func TestImportedHash(t *testing.T) {
-	a, pw, _ := setup(t, memadapter.New(), password.Options{Identifier: password.Username})
+	a, pw, _ := setup(t, memstore.New(), password.Options{Identifier: password.Username})
 	u, _ := a.CreateUser(ctx, sesam.NewUser{Username: "admin"})
 	const gpanelHash = "$argon2id$v=19$m=65536,t=2,p=2$6IM2O4zQ9qunG8BfXBYmCQ$WiHMXjmHv7vHT6wuNZZT67E4xtv7lbfInnWXayAWmHc"
 	if err := pw.SetPasswordHash(ctx, u.ID, "plain text"); !errors.Is(err, sesam.ErrInvalidInput) {
@@ -309,7 +309,7 @@ func TestImportedHash(t *testing.T) {
 
 func TestPasswordResetWithDeprecatedMailer(t *testing.T) {
 	m := &mailer{}
-	a, pw, c := setup(t, memadapter.New(), password.Options{
+	a, pw, c := setup(t, memstore.New(), password.Options{
 		Mailer:   m,
 		ResetURL: func(tok string) string { return "https://app.example.com/reset?token=" + tok },
 	})
@@ -369,19 +369,19 @@ func TestOptionsChecked(t *testing.T) {
 		"url without sender": {ResetURL: func(string) string { return "" }},
 		"min above max":      {MinLength: 20, MaxLength: 10},
 	} {
-		_, err := sesam.New(sesam.Config{Adapter: memadapter.New(), BaseURL: "https://a.example", Plugins: []sesam.Plugin{password.New(o)}})
+		_, err := sesam.New(sesam.Config{Store: memstore.New(), BaseURL: "https://a.example", Plugins: []sesam.Plugin{password.New(o)}})
 		if err == nil {
 			t.Errorf("%s: no error", name)
 		}
 	}
-	_, pw, _ := setup(t, memadapter.New(), password.Options{})
+	_, pw, _ := setup(t, memstore.New(), password.Options{})
 	if err := pw.RequestReset(ctx, "a@example.com", meta); err == nil {
 		t.Fatal("reset without mailer")
 	}
 }
 
 func TestEmailOrUsername(t *testing.T) {
-	_, pw, _ := setup(t, memadapter.New(), password.Options{Identifier: password.EmailOrUsername})
+	_, pw, _ := setup(t, memstore.New(), password.Options{Identifier: password.EmailOrUsername})
 	// Moved from a system with names only: no e-mail address yet.
 	if _, err := pw.CreateUser(ctx, sesam.NewUser{Username: "admin"}, pass); err != nil {
 		t.Fatal(err)
@@ -416,7 +416,7 @@ func TestEmailOrUsername(t *testing.T) {
 }
 
 func TestPasswordReset(t *testing.T) {
-	a, pw, c, box := setupMail(t, memadapter.New(), password.Options{
+	a, pw, c, box := setupMail(t, memstore.New(), password.Options{
 		Identifier: password.EmailOrUsername,
 		ResetURL:   func(tok string) string { return "https://app.example.com/reset?token=" + tok },
 	})
@@ -463,7 +463,7 @@ func TestPasswordReset(t *testing.T) {
 }
 
 func TestResetEmailCanBeReplaced(t *testing.T) {
-	_, pw, _, box := setupMail(t, memadapter.New(), password.Options{
+	_, pw, _, box := setupMail(t, memstore.New(), password.Options{
 		ResetURL: func(tok string) string { return "https://app.example.com/r/" + tok },
 		ResetTTL: 30 * time.Minute,
 		ResetEmail: func(d password.ResetEmailData) sesam.Email {
@@ -487,7 +487,7 @@ func TestResetEmailCanBeReplaced(t *testing.T) {
 func TestSendFailureIsInternal(t *testing.T) {
 	pw := password.New(password.Options{ResetURL: func(tok string) string { return "https://x.example/" + tok }})
 	a, err := sesam.New(sesam.Config{
-		Adapter: memadapter.New(), BaseURL: "https://app.example.com", Plugins: []sesam.Plugin{pw},
+		Store: memstore.New(), BaseURL: "https://app.example.com", Plugins: []sesam.Plugin{pw},
 		// Even an error that looks like one for people must not reach them.
 		SendEmail: func(context.Context, sesam.Email) error {
 			return sesam.InvalidInput("smtp 554 relay denied for 10.0.0.3")
@@ -508,7 +508,7 @@ func TestSendFailureIsInternal(t *testing.T) {
 // Many people behind one address: successful sign-ins must not use up the
 // client limit, failures still do.
 func TestSuccessfulSignInsDoNotCountAgainstTheClient(t *testing.T) {
-	_, pw, _ := setup(t, memadapter.New(), password.Options{MaxAttemptsPerClient: 3})
+	_, pw, _ := setup(t, memstore.New(), password.Options{MaxAttemptsPerClient: 3})
 	if _, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass); err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestSuccessfulSignInsDoNotCountAgainstTheClient(t *testing.T) {
 }
 
 func TestVerifyPassword(t *testing.T) {
-	_, pw, _ := setup(t, memadapter.New(), password.Options{MaxAttemptsPerName: 2})
+	_, pw, _ := setup(t, memstore.New(), password.Options{MaxAttemptsPerName: 2})
 	u, err := pw.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}, pass)
 	if err != nil {
 		t.Fatal(err)

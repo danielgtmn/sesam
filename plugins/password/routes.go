@@ -3,7 +3,7 @@ package password
 import (
 	"net/http"
 
-	"github.com/danielgtmn/sesam"
+	"github.com/danielgtmn/sesam/v2"
 )
 
 // Routes registers the endpoints under Config.BasePath:

@@ -17,18 +17,19 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/danielgtmn/sesam"
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/adapters/memadapter"
-	"github.com/danielgtmn/sesam/adapters/sqladapter"
-	"github.com/danielgtmn/sesam/plugins/password"
+	"github.com/danielgtmn/ablage"
+	"github.com/danielgtmn/ablage/memstore"
+	"github.com/danielgtmn/ablage/sqlstore"
+
+	"github.com/danielgtmn/sesam/v2"
+	"github.com/danielgtmn/sesam/v2/plugins/password"
 )
 
 // TestHTTPFlow drives the endpoints with a real HTTP client and cookie jar,
 // the way a browser app uses them, on every database.
 func TestHTTPFlow(t *testing.T) {
-	for name, open := range map[string]func(*testing.T) adapter.Adapter{
-		"memory":   func(*testing.T) adapter.Adapter { return memadapter.New() },
+	for name, open := range map[string]func(*testing.T) ablage.Store{
+		"memory":   func(*testing.T) ablage.Store { return memstore.New() },
 		"sqlite":   openSQLite,
 		"postgres": openPostgres,
 	} {
@@ -36,20 +37,20 @@ func TestHTTPFlow(t *testing.T) {
 	}
 }
 
-func openSQLite(t *testing.T) adapter.Adapter {
+func openSQLite(t *testing.T) ablage.Store {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "app.db")+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_txlock=immediate")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	a, err := sqladapter.New(db, sqladapter.SQLite)
+	a, err := sqlstore.New(db, sqlstore.SQLite)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
 }
 
-func openPostgres(t *testing.T) adapter.Adapter {
+func openPostgres(t *testing.T) ablage.Store {
 	dsn := os.Getenv("SESAM_TEST_POSTGRES")
 	if dsn == "" {
 		t.Skip("SESAM_TEST_POSTGRES not set")
@@ -73,7 +74,7 @@ func openPostgres(t *testing.T) adapter.Adapter {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	a, err := sqladapter.New(db, sqladapter.Postgres)
+	a, err := sqlstore.New(db, sqlstore.Postgres)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-func httpFlow(t *testing.T, db adapter.Adapter) {
+func httpFlow(t *testing.T, db ablage.Store) {
 	m := &outbox{}
 	srv := httptest.NewUnstartedServer(nil)
 	srv.Start()
@@ -115,7 +116,7 @@ func httpFlow(t *testing.T, db adapter.Adapter) {
 	pw := password.New(password.Options{
 		ResetURL: func(tok string) string { return srv.URL + "/reset?token=" + tok },
 	})
-	a, err := sesam.New(sesam.Config{Adapter: db, BaseURL: srv.URL, Plugins: []sesam.Plugin{pw}, SendEmail: m.send})
+	a, err := sesam.New(sesam.Config{Store: db, BaseURL: srv.URL, Plugins: []sesam.Plugin{pw}, SendEmail: m.send})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +206,11 @@ func httpFlow(t *testing.T, db adapter.Adapter) {
 // page sends it in.
 func TestHTTPSignInEitherField(t *testing.T) {
 	pw := password.New(password.Options{Identifier: password.EmailOrUsername})
-	a, err := sesam.New(sesam.Config{Adapter: memadapter.New(), BaseURL: "http://localhost", Plugins: []sesam.Plugin{pw}})
+	a, err := sesam.New(sesam.Config{Store: memstore.New(), BaseURL: "http://localhost", Plugins: []sesam.Plugin{pw}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pw.CreateUser(ctx, sesam.NewUser{Username: "anna", Email: "anna@example.com"}, pass); err != nil {
