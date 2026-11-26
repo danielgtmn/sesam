@@ -10,10 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielgtmn/sesam"
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/adapters/memadapter"
-	"github.com/danielgtmn/sesam/schema"
+	"github.com/danielgtmn/ablage"
+	"github.com/danielgtmn/ablage/memstore"
+	"github.com/danielgtmn/sesam/v2"
 )
 
 var ctx = context.Background()
@@ -33,7 +32,7 @@ func (c *clock) Add(d time.Duration) {
 func newAuth(t *testing.T, mod func(*sesam.Config)) (*sesam.Auth, *clock) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)}
-	cfg := sesam.Config{Adapter: memadapter.New(), BaseURL: "https://app.example.com", Now: c.Now}
+	cfg := sesam.Config{Store: memstore.New(), BaseURL: "https://app.example.com", Now: c.Now}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -59,11 +58,11 @@ func must[T any](t *testing.T) func(T, error) T {
 
 func TestNewRejects(t *testing.T) {
 	cases := map[string]sesam.Config{
-		"no adapter":  {BaseURL: "https://a.example"},
-		"no base url": {Adapter: memadapter.New()},
-		"bad scheme":  {Adapter: memadapter.New(), BaseURL: "ftp://a.example"},
-		"bad origin":  {Adapter: memadapter.New(), BaseURL: "https://a.example", TrustedOrigins: []string{"nope"}},
-		"dup plugin":  {Adapter: memadapter.New(), BaseURL: "https://a.example", Plugins: []sesam.Plugin{fakePlugin{}, fakePlugin{}}},
+		"no store":    {BaseURL: "https://a.example"},
+		"no base url": {Store: memstore.New()},
+		"bad scheme":  {Store: memstore.New(), BaseURL: "ftp://a.example"},
+		"bad origin":  {Store: memstore.New(), BaseURL: "https://a.example", TrustedOrigins: []string{"nope"}},
+		"dup plugin":  {Store: memstore.New(), BaseURL: "https://a.example", Plugins: []sesam.Plugin{fakePlugin{}, fakePlugin{}}},
 	}
 	for name, cfg := range cases {
 		if _, err := sesam.New(cfg); err == nil {
@@ -74,36 +73,44 @@ func TestNewRejects(t *testing.T) {
 
 type fakePlugin struct{}
 
-func (fakePlugin) ID() string { return "fake" }
-func (fakePlugin) Schema() []schema.Table {
-	return []schema.Table{
-		{Name: "notes", Fields: []schema.Field{{Name: "user_id", Type: schema.String, Required: true, Ref: &schema.Reference{Table: sesam.TableUsers}}}},
-		{Name: sesam.TableUsers, Fields: []schema.Field{{Name: "locale", Type: schema.String}}},
-	}
-}
+func (fakePlugin) ID() string             { return "fake" }
 func (fakePlugin) Init(*sesam.Auth) error { return nil }
 
-func TestPluginSchemaIsMerged(t *testing.T) {
-	a, _ := newAuth(t, func(c *sesam.Config) { c.Plugins = []sesam.Plugin{fakePlugin{}} })
-	var users schema.Table
-	for _, tb := range a.Tables() {
-		if tb.Name == sesam.TableUsers {
-			users = tb
-		}
-	}
-	if _, ok := users.Field("locale"); !ok {
-		t.Fatal("plugin field not added to users")
-	}
-	// Rows in plugin tables that reference a user go with it.
+// note is a row of a plugin's table that references users.
+type note struct {
+	ID     string
+	UserID string `db:",ref=auth_users,cascade"`
+}
+
+type notesPlugin struct{ notes *ablage.Repository[note] }
+
+func (*notesPlugin) ID() string { return "notes" }
+func (p *notesPlugin) Init(a *sesam.Auth) (err error) {
+	p.notes, err = ablage.NewRepository[note](a.Store(), "auth_notes")
+	return err
+}
+
+// A plugin declares its tables in Init; Migrate creates them, and rows that
+// reference a user go with it.
+func TestPluginTables(t *testing.T) {
+	p := &notesPlugin{}
+	a, _ := newAuth(t, func(c *sesam.Config) { c.Plugins = []sesam.Plugin{p} })
 	u := must[sesam.User](t)(a.CreateUser(ctx, sesam.NewUser{Email: "a@example.com"}))
-	if err := a.Adapter().Create(ctx, "notes", adapter.Row{"id": "n1", "user_id": u.ID}); err != nil {
+	if err := p.notes.Create(ctx, &note{UserID: u.ID}); err != nil {
 		t.Fatal(err)
 	}
+	must[string](t)(a.CreateVerification(ctx, "test", u.ID, time.Hour))
 	if err := a.DeleteUser(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := a.Adapter().Count(ctx, "notes"); n != 0 {
+	if n, _ := p.notes.Count(ctx, ablage.All); n != 0 {
 		t.Fatalf("%d notes left", n)
+	}
+	if n, _ := a.Store().Count(ctx, sesam.TableVerifications, ablage.All); n != 0 {
+		t.Fatalf("%d one-time tokens left", n)
+	}
+	if err := a.DeleteUser(ctx, u.ID); !errors.Is(err, sesam.ErrNotFound) {
+		t.Fatalf("deleting again: %v", err)
 	}
 }
 
@@ -225,7 +232,7 @@ func TestSessionLifetime(t *testing.T) {
 	if err := a.DeleteExpired(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := a.Adapter().Count(ctx, sesam.TableSessions); n != 0 {
+	if n, _ := a.Store().Count(ctx, sesam.TableSessions, ablage.All); n != 0 {
 		t.Fatalf("%d sessions left after DeleteExpired", n)
 	}
 }

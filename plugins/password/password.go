@@ -19,10 +19,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/danielgtmn/sesam"
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/internal/argon"
-	"github.com/danielgtmn/sesam/schema"
+	"github.com/danielgtmn/ablage"
+
+	"github.com/danielgtmn/sesam/v2"
+	"github.com/danielgtmn/sesam/v2/internal/argon"
 )
 
 // Identifier is what people sign in with.
@@ -137,8 +137,7 @@ func New(o Options) *Plugin {
 	return p
 }
 
-func (p *Plugin) ID() string             { return "password" }
-func (p *Plugin) Schema() []schema.Table { return nil }
+func (p *Plugin) ID() string { return "password" }
 
 func (p *Plugin) Init(a *sesam.Auth) error {
 	if p.o.Identifier != Email && p.o.Identifier != Username && p.o.Identifier != EmailOrUsername {
@@ -231,22 +230,35 @@ func (p *Plugin) CreateUser(ctx context.Context, nu sesam.NewUser, password stri
 	if err != nil {
 		return sesam.User{}, err
 	}
-	return p.a.CreateUserTx(ctx, nu, func(tx adapter.Adapter, u sesam.User) error {
-		return p.createAccount(ctx, tx, u.ID, h)
+	return p.a.CreateUserTx(ctx, nu, func(tx ablage.Store, u sesam.User) error {
+		return p.createAccount(ctx, p.a.Accounts().With(tx), u.ID, h)
 	})
 }
 
-func (p *Plugin) createAccount(ctx context.Context, db adapter.Adapter, userID, hash string) error {
-	now := adapter.NormalizeTime(p.a.Now())
-	return db.Create(ctx, sesam.TableAccounts, adapter.Row{
-		"id": sesam.NewID(), "user_id": userID, "provider": Provider, "provider_account_id": userID,
-		"password_hash": hash, "created_at": now, "updated_at": now,
+func (p *Plugin) createAccount(ctx context.Context, accounts *ablage.Repository[sesam.Account], userID, hash string) error {
+	now := ablage.NormalizeTime(p.a.Now())
+	return accounts.Create(ctx, &sesam.Account{
+		ID: sesam.NewID(), UserID: userID, Provider: Provider, ProviderAccountID: userID,
+		PasswordHash: &hash, CreatedAt: now, UpdatedAt: now,
 	})
 }
 
-func (p *Plugin) account(ctx context.Context, userID string) (adapter.Row, error) {
-	return p.a.Adapter().FindOne(ctx, sesam.TableAccounts,
-		adapter.Eq("provider", Provider), adapter.Eq("provider_account_id", userID))
+// whereAccount selects the password account of a user.
+func whereAccount(userID string) ablage.Cond {
+	return ablage.And(ablage.Eq("provider", Provider), ablage.Eq("provider_account_id", userID))
+}
+
+// passwordHash returns the stored hash of a user; ablage.ErrNotFound if
+// the user has no password.
+func (p *Plugin) passwordHash(ctx context.Context, userID string) (string, error) {
+	acc, err := p.a.Accounts().First(ctx, ablage.Query{Where: whereAccount(userID)})
+	if err != nil {
+		return "", err
+	}
+	if acc.PasswordHash == nil || *acc.PasswordHash == "" {
+		return "", fmt.Errorf("password: %w: account without hash", ablage.ErrNotFound)
+	}
+	return *acc.PasswordHash, nil
 }
 
 func (p *Plugin) lookup(ctx context.Context, identifier string) (sesam.User, error) {
@@ -290,10 +302,8 @@ func (p *Plugin) SignIn(ctx context.Context, c Credentials, m sesam.SessionMeta)
 	}
 	hash := ""
 	if err == nil {
-		acc, err := p.account(ctx, u.ID)
-		if err == nil {
-			hash = acc.String("password_hash")
-		} else if !errors.Is(err, adapter.ErrNotFound) {
+		hash, err = p.passwordHash(ctx, u.ID)
+		if err != nil && !errors.Is(err, ablage.ErrNotFound) {
 			return fail(err)
 		}
 	}
@@ -329,15 +339,15 @@ func (p *Plugin) VerifyPassword(ctx context.Context, userID, password string) er
 	if err := p.a.Limit(ctx, "password:change:"+userID, p.o.MaxAttemptsPerName, p.o.AttemptWindow); err != nil {
 		return err
 	}
-	acc, err := p.account(ctx, userID)
-	if errors.Is(err, adapter.ErrNotFound) {
+	hash, err := p.passwordHash(ctx, userID)
+	if errors.Is(err, ablage.ErrNotFound) {
 		p.slots.Verify(p.dummy(), password)
 		return sesam.ErrWrongPassword
 	}
 	if err != nil {
 		return err
 	}
-	if len(password) > 4*p.o.MaxLength || !p.slots.Verify(acc.String("password_hash"), password) {
+	if len(password) > 4*p.o.MaxLength || !p.slots.Verify(hash, password) {
 		return sesam.ErrWrongPassword
 	}
 	return p.a.ResetLimit(ctx, "password:change:"+userID)
@@ -393,20 +403,18 @@ func (p *Plugin) setHash(ctx context.Context, userID, h string) error {
 
 // storeHash updates the password account, or creates it.
 func (p *Plugin) storeHash(ctx context.Context, userID, h string) error {
-	db := p.a.Adapter()
-	n, err := db.Update(ctx, sesam.TableAccounts,
-		adapter.Row{"password_hash": h, "updated_at": adapter.NormalizeTime(p.a.Now())},
-		adapter.Eq("provider", Provider), adapter.Eq("provider_account_id", userID))
+	n, err := p.a.Store().Update(ctx, sesam.TableAccounts,
+		ablage.Row{"password_hash": h, "updated_at": ablage.NormalizeTime(p.a.Now())}, whereAccount(userID))
 	if err != nil || n > 0 {
 		return err
 	}
-	return p.createAccount(ctx, db, userID, h)
+	return p.createAccount(ctx, p.a.Accounts(), userID, h)
 }
 
 // HasPassword tells whether the user can sign in with a password.
 func (p *Plugin) HasPassword(ctx context.Context, userID string) (bool, error) {
-	_, err := p.account(ctx, userID)
-	if errors.Is(err, adapter.ErrNotFound) {
+	_, err := p.passwordHash(ctx, userID)
+	if errors.Is(err, ablage.ErrNotFound) {
 		return false, nil
 	}
 	return err == nil, err

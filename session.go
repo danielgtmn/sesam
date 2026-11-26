@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielgtmn/sesam/adapter"
+	"github.com/danielgtmn/ablage"
 )
 
 // Session is a sign-in on one device. ID is not secret: it is the hash of
@@ -29,15 +29,15 @@ type SessionMeta struct {
 // touchEvery limits how often using a session writes to the database.
 const touchEvery = time.Minute
 
-func sessionFromRow(r adapter.Row) Session {
+func (r sessionRow) session() Session {
 	return Session{
-		ID:         r.String("id"),
-		UserID:     r.String("user_id"),
-		CreatedAt:  r.Time("created_at"),
-		ExpiresAt:  r.Time("expires_at"),
-		LastSeenAt: r.Time("last_seen_at"),
-		IP:         r.String("ip"),
-		UserAgent:  r.String("user_agent"),
+		ID:         r.ID,
+		UserID:     r.UserID,
+		CreatedAt:  r.CreatedAt,
+		ExpiresAt:  r.ExpiresAt,
+		LastSeenAt: r.LastSeenAt,
+		IP:         deref(r.IP),
+		UserAgent:  deref(r.UserAgent),
 	}
 }
 
@@ -87,20 +87,32 @@ func (a *Auth) SignIn(ctx context.Context, u User, m SessionMeta) (string, Sessi
 // CreateSession creates a session without running hooks and returns its
 // token. The token is shown only here; only its hash is stored.
 func (a *Auth) CreateSession(ctx context.Context, userID string, m SessionMeta) (string, Session, error) {
-	now := adapter.NormalizeTime(a.Now())
+	now := ablage.NormalizeTime(a.Now())
 	token := NewToken()
 	s := Session{
 		ID: HashToken(token), UserID: userID, CreatedAt: now, ExpiresAt: a.expiry(now, now),
 		LastSeenAt: now, IP: truncate(m.IP, 64), UserAgent: truncate(m.UserAgent, 512),
 	}
-	err := a.db.Create(ctx, TableSessions, adapter.Row{
-		"id": s.ID, "user_id": s.UserID, "created_at": s.CreatedAt, "expires_at": s.ExpiresAt,
-		"last_seen_at": s.LastSeenAt, "ip": nullable(s.IP), "user_agent": nullable(s.UserAgent),
-	})
-	if err != nil {
+	if err := a.ImportSession(ctx, s); err != nil {
 		return "", Session{}, err
 	}
 	return token, s, nil
+}
+
+// ImportSession stores a session as it is, without running hooks, e.g. to
+// take over sessions of a sign-in an app had before sesam. s.ID must be
+// HashToken of the token in the person's cookie, or Session finds it
+// never; the user must exist (else an error matching ablage.ErrReference).
+// A session with this ID already stored gives an error matching
+// ablage.ErrDuplicate.
+func (a *Auth) ImportSession(ctx context.Context, s Session) error {
+	if s.ID == "" || s.UserID == "" {
+		return InvalidInput("A session needs the hash of its token and a user.")
+	}
+	return a.r.sessions.Create(ctx, &sessionRow{
+		ID: s.ID, UserID: s.UserID, CreatedAt: s.CreatedAt, ExpiresAt: s.ExpiresAt,
+		LastSeenAt: s.LastSeenAt, IP: nullable(s.IP), UserAgent: nullable(s.UserAgent),
+	})
 }
 
 // Session returns the session for a token and its user, or
@@ -111,14 +123,14 @@ func (a *Auth) Session(ctx context.Context, token string) (Session, User, error)
 		return Session{}, User{}, ErrUnauthenticated
 	}
 	now := a.Now()
-	r, err := a.db.FindOne(ctx, TableSessions, adapter.Eq("id", HashToken(token)), adapter.Gt("expires_at", now))
-	if errors.Is(err, adapter.ErrNotFound) {
+	r, err := a.r.sessions.First(ctx, ablage.Query{Where: ablage.And(ablage.Eq("id", HashToken(token)), ablage.Gt("expires_at", now))})
+	if errors.Is(err, ablage.ErrNotFound) {
 		return Session{}, User{}, ErrUnauthenticated
 	}
 	if err != nil {
 		return Session{}, User{}, err
 	}
-	s := sessionFromRow(r)
+	s := r.session()
 	if !now.Before(s.CreatedAt.Add(a.cfg.Session.MaxLifetime)) {
 		return Session{}, User{}, ErrUnauthenticated
 	}
@@ -130,9 +142,13 @@ func (a *Auth) Session(ctx context.Context, token string) (Session, User, error)
 		return Session{}, User{}, err
 	}
 	if now.Sub(s.LastSeenAt) >= touchEvery {
-		s.LastSeenAt = adapter.NormalizeTime(now)
-		s.ExpiresAt = adapter.NormalizeTime(a.expiry(s.CreatedAt, now))
-		if _, err := a.db.Update(ctx, TableSessions, adapter.Row{"last_seen_at": s.LastSeenAt, "expires_at": s.ExpiresAt}, adapter.Eq("id", s.ID)); err != nil {
+		s.LastSeenAt = ablage.NormalizeTime(now)
+		s.ExpiresAt = ablage.NormalizeTime(a.expiry(s.CreatedAt, now))
+		err := a.r.sessions.Patch(ctx, s.ID, ablage.Row{"last_seen_at": s.LastSeenAt, "expires_at": s.ExpiresAt})
+		if errors.Is(err, ablage.ErrNotFound) { // signed out in between
+			return Session{}, User{}, ErrUnauthenticated
+		}
+		if err != nil {
 			return Session{}, User{}, err
 		}
 	}
@@ -141,16 +157,16 @@ func (a *Auth) Session(ctx context.Context, token string) (Session, User, error)
 
 // Sessions lists the active sessions of a user, newest first.
 func (a *Auth) Sessions(ctx context.Context, userID string) ([]Session, error) {
-	rows, err := a.db.FindMany(ctx, TableSessions, adapter.Query{
-		Where:   []adapter.Where{adapter.Eq("user_id", userID), adapter.Gt("expires_at", a.Now())},
-		OrderBy: "created_at", Desc: true,
+	rows, err := a.r.sessions.Find(ctx, ablage.Query{
+		Where:   ablage.And(ablage.Eq("user_id", userID), ablage.Gt("expires_at", a.Now())),
+		OrderBy: []ablage.Order{ablage.Desc("created_at")},
 	})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Session, 0, len(rows))
 	for _, r := range rows {
-		s := sessionFromRow(r)
+		s := r.session()
 		if a.Now().Before(s.CreatedAt.Add(a.cfg.Session.MaxLifetime)) {
 			out = append(out, s)
 		}
@@ -165,17 +181,18 @@ func (a *Auth) SignOut(ctx context.Context, token string) error {
 		return nil
 	}
 	id := HashToken(token)
-	r, err := a.db.FindOne(ctx, TableSessions, adapter.Eq("id", id))
-	if errors.Is(err, adapter.ErrNotFound) {
+	r, err := a.r.sessions.Get(ctx, id)
+	if errors.Is(err, ablage.ErrNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := a.db.Delete(ctx, TableSessions, adapter.Eq("id", id)); err != nil {
+	n, err := a.r.sessions.DeleteWhere(ctx, ablage.Eq("id", id))
+	if err != nil || n == 0 { // n == 0: signed out in between
 		return err
 	}
-	s := sessionFromRow(r)
+	s := r.session()
 	for _, h := range a.allHooks() {
 		if h.AfterSignOut != nil {
 			h.AfterSignOut(ctx, s)
@@ -187,7 +204,7 @@ func (a *Auth) SignOut(ctx context.Context, token string) error {
 // RevokeSession ends one session of a user by its ID. A session of another
 // user is ErrNotFound.
 func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) error {
-	n, err := a.db.Delete(ctx, TableSessions, adapter.Eq("id", sessionID), adapter.Eq("user_id", userID))
+	n, err := a.r.sessions.DeleteWhere(ctx, ablage.And(ablage.Eq("id", sessionID), ablage.Eq("user_id", userID)))
 	if err != nil {
 		return err
 	}
@@ -201,9 +218,9 @@ func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) erro
 // be empty) and returns how many ended. Use it after a password change or
 // for "sign out everywhere".
 func (a *Auth) RevokeUserSessions(ctx context.Context, userID, keepID string) (int64, error) {
-	where := []adapter.Where{adapter.Eq("user_id", userID)}
+	where := ablage.Eq("user_id", userID)
 	if keepID != "" {
-		where = append(where, adapter.Ne("id", keepID))
+		where = ablage.And(where, ablage.Ne("id", keepID))
 	}
-	return a.db.Delete(ctx, TableSessions, where...)
+	return a.r.sessions.DeleteWhere(ctx, where)
 }

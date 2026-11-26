@@ -14,7 +14,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: gomod
-    directory: /
+    directories: [/, /internal/v1compat]
     schedule:
       interval: weekly
     commit-message:

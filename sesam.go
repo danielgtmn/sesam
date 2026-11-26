@@ -1,13 +1,14 @@
 // Package sesam is authentication you embed in a Go app: users, sign-in,
 // sessions and cookies, with each way of signing in as a plugin (see
-// sesam/plugins) and the data in the app's own database (see
-// sesam/adapters).
+// sesam/plugins) and the data in the app's own database through
+// github.com/danielgtmn/ablage (SQLite, Postgres, or memory for tests).
 //
 // sesam answers "who is this?". What that person may do is up to the app.
 //
+//	store, err := sqlstore.New(db, sqlstore.SQLite)
 //	pw := password.New(password.Options{})
 //	auth, err := sesam.New(sesam.Config{
-//		Adapter: sqlAdapter,
+//		Store:   store,
 //		BaseURL: "https://app.example.com",
 //		Plugins: []sesam.Plugin{pw},
 //	})
@@ -28,14 +29,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/schema"
+	"github.com/danielgtmn/ablage"
 )
 
-// Config configures an Auth. Adapter and BaseURL are required.
+// Config configures an Auth. Store and BaseURL are required.
 type Config struct {
-	// Adapter stores the data, e.g. sqladapter.New(db, sqladapter.SQLite).
-	Adapter adapter.Adapter
+	// Store keeps the data, e.g. sqlstore.New(db, sqlstore.SQLite) or
+	// memstore.New() (package github.com/danielgtmn/ablage). It may hold
+	// the app's own tables too. sesam's tables are named "auth_…"; give the
+	// store no table prefix to keep them so.
+	Store ablage.Store
 
 	// BaseURL is where the app is reached, e.g. "https://app.example.com".
 	// Its origin is trusted for changing requests, and with https cookies
@@ -98,8 +101,8 @@ type CookieConfig struct {
 // Auth is a configured sesam instance. Create it with New.
 type Auth struct {
 	cfg      Config
-	db       adapter.Adapter
-	tables   []schema.Table
+	db       ablage.Store
+	r        repos
 	origins  map[string]bool
 	secure   bool
 	hooksMu  sync.Mutex
@@ -110,12 +113,12 @@ type Auth struct {
 	basePath string
 }
 
-// New checks the configuration, collects the plugins' tables and
+// New checks the configuration, declares sesam's tables on the store and
 // initializes the plugins. It does not touch the database; call Migrate for
 // that.
 func New(cfg Config) (*Auth, error) {
-	if cfg.Adapter == nil {
-		return nil, errors.New("sesam: Config.Adapter is required")
+	if cfg.Store == nil {
+		return nil, errors.New("sesam: Config.Store is required")
 	}
 	base, err := url.Parse(cfg.BaseURL)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
@@ -148,7 +151,7 @@ func New(cfg Config) (*Auth, error) {
 	}
 	a := &Auth{
 		cfg:      cfg,
-		db:       cfg.Adapter,
+		db:       cfg.Store,
 		origins:  map[string]bool{origin(base): true},
 		secure:   base.Scheme == "https",
 		plugins:  map[string]Plugin{},
@@ -167,7 +170,9 @@ func New(cfg Config) (*Auth, error) {
 	}
 	a.hooks = append(a.hooks, cfg.Hooks)
 
-	decl := append([]schema.Table(nil), coreTables...)
+	if a.r, err = newRepos(a.db); err != nil {
+		return nil, fmt.Errorf("sesam: %w", err)
+	}
 	for _, p := range cfg.Plugins {
 		if p == nil {
 			return nil, errors.New("sesam: nil plugin")
@@ -176,13 +181,6 @@ func New(cfg Config) (*Auth, error) {
 			return nil, fmt.Errorf("sesam: plugin %q added twice", p.ID())
 		}
 		a.plugins[p.ID()] = p
-		decl = append(decl, p.Schema()...)
-	}
-	if a.tables, err = schema.Merge(decl...); err != nil {
-		return nil, fmt.Errorf("sesam: %w", err)
-	}
-	if err := a.db.Schema(a.tables); err != nil {
-		return nil, fmt.Errorf("sesam: %w", err)
 	}
 	for _, p := range cfg.Plugins {
 		if err := p.Init(a); err != nil {
@@ -199,15 +197,15 @@ func New(cfg Config) (*Auth, error) {
 }
 
 // Migrate creates the tables, fields and indexes sesam and the plugins
-// need. It only adds and can run at every start.
+// need, and those of every other table declared on the store. It only adds
+// and can run at every start. It is the same as Config.Store.Migrate.
 func (a *Auth) Migrate(ctx context.Context) error { return a.db.Migrate(ctx) }
 
-// Tables returns the complete schema: core tables with the plugins'
-// additions.
-func (a *Auth) Tables() []schema.Table { return a.tables }
+// Store returns the store, for plugins.
+func (a *Auth) Store() ablage.Store { return a.db }
 
-// Adapter returns the adapter, for plugins.
-func (a *Auth) Adapter() adapter.Adapter { return a.db }
+// Accounts returns the repository of the accounts table, for plugins.
+func (a *Auth) Accounts() *ablage.Repository[Account] { return a.r.accounts }
 
 // Now returns the current time from the configured clock.
 func (a *Auth) Now() time.Time { return a.cfg.Now() }
@@ -225,17 +223,17 @@ func (a *Auth) Plugin(id string) (Plugin, bool) {
 // counters. Call it now and then, e.g. once an hour.
 func (a *Auth) DeleteExpired(ctx context.Context) error {
 	now := a.Now()
-	if _, err := a.db.Delete(ctx, TableSessions, adapter.Lte("expires_at", now)); err != nil {
+	if _, err := a.r.sessions.DeleteWhere(ctx, ablage.Or(
+		ablage.Lte("expires_at", now),
+		ablage.Lte("created_at", now.Add(-a.cfg.Session.MaxLifetime)),
+	)); err != nil {
 		return err
 	}
-	if _, err := a.db.Delete(ctx, TableSessions, adapter.Lte("created_at", now.Add(-a.cfg.Session.MaxLifetime))); err != nil {
+	if _, err := a.r.verifications.DeleteWhere(ctx, ablage.Lte("expires_at", now)); err != nil {
 		return err
 	}
-	if _, err := a.db.Delete(ctx, TableVerifications, adapter.Lte("expires_at", now)); err != nil {
-		return err
-	}
-	// Limits use windows of at most a day in practice; keep a margin.
-	_, err := a.db.Delete(ctx, TableRateLimits, adapter.Lte("window_start", now.Add(-7*24*time.Hour)))
+	// Windows are at most 7 days long (see Limit).
+	_, err := a.db.Delete(ctx, TableRateLimits, ablage.Lte("window_start", now.Add(-7*24*time.Hour)))
 	return err
 }
 

@@ -2,7 +2,7 @@
 
 sesam is authentication you embed in a Go app. Instead of running a separate sign-in service, you add sesam to your program: it keeps users and sessions in your database, serves the sign-in endpoints under a path of your choice, and tells your handlers who is signed in.
 
-It is built like [Better Auth](https://www.better-auth.com): a small core, every way of signing in as a plugin, and adapters for the database.
+It is built like [Better Auth](https://www.better-auth.com): a small core, every way of signing in as a plugin, and the data in your database through [ablage](https://github.com/danielgtmn/ablage).
 
 What it does today:
 
@@ -25,7 +25,8 @@ sesam is **early**. What exists is tested on every supported database, but the A
 - [[Password|Password]]: the password plugin
 - [[HTTP API|HTTP-API]]: the endpoints
 - [[Databases|Databases]]: SQLite, Postgres, tables and migrations
-- [[Writing Plugins|Writing-Plugins]] and [[Writing Adapters|Writing-Adapters]]
+- [[Writing Plugins|Writing-Plugins]]
+- [[Upgrading to v2|Upgrading-to-v2]]: from sesam 1.x
 - [[Security|Security]]: what sesam protects and what is up to you
 - [[Architecture|Architecture]]: how the parts fit together
 - [[Development|Development]]: build, test, release

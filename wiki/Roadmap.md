@@ -3,7 +3,7 @@
 ## Done
 
 - Core: users, sessions and cookies, attempt limits, one-time tokens, hooks, endpoints, middleware
-- Adapters: SQLite and Postgres (`sqladapter`), memory, conformance tests
+- Storage on [ablage](https://github.com/danielgtmn/ablage) (SQLite, Postgres, memory), with databases of sesam 1.x carried over (v2)
 - Password plugin: e-mail or username, sign-up (can be turned off), change, reset by e-mail link, importing argon2id hashes
 - gpanel signs in through sesam ([ownpanel#81](https://github.com/danielgtmn/ownpanel/pull/81))
 
@@ -23,5 +23,5 @@ Every item below has an [issue](https://github.com/danielgtmn/sesam/issues).
 - Organizations with members and roles, also nested (`plugins/organization`)
 - Sign-in by e-mail code or link
 - A JavaScript client and UI components
-- More adapters (MySQL)
+- MySQL (a store in ablage)
 - Acting as a sign-in server for other apps (OpenID Connect)

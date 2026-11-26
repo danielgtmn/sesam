@@ -9,7 +9,9 @@ a workflow: edit it there.
 sesam is authentication you embed in a Go app, in the spirit of Better
 Auth: a small core (users, sessions, cookies, attempt limits, one-time
 tokens, hooks, HTTP endpoints), each way of signing in as a plugin, and the
-data in the app's own database through an adapter. It answers "who is
+data in the app's own database through
+[ablage](https://github.com/danielgtmn/ablage) (`~/Development/ablage`
+locally), a separate module of the same maintainer. It answers "who is
 this?"; what a person may do is decided by the app. The first app using it
 is gpanel ([ownpanel](https://github.com/danielgtmn/ownpanel)).
 
@@ -17,13 +19,10 @@ is gpanel ([ownpanel](https://github.com/danielgtmn/ownpanel)).
 
 ```
 *.go (root)            package sesam: the core. New, Config, users, sessions, cookies,
-                       Limit, verifications, hooks, Handler, Middleware
-schema/                declaring tables and fields; Merge, Dependents
-adapter/               the Adapter interface, Row, Where, Incr, shared value checks
-adapters/sqladapter/   database/sql with the SQLite and Postgres dialects, Migrate, DDL
-adapters/memadapter/   in memory, for tests
-adapters/adaptertest/  conformance tests every adapter must pass
+                       Limit, verifications, hooks, Handler, Middleware; tables.go
+                       declares the auth_* tables (ablage repositories)
 plugins/password/      sign-in with e-mail or username and password
+internal/v1compat/     own module: databases made by sesam v1.0.0 keep working
 internal/argon/        argon2id hashing (same format as gpanel)
 examples/basic/        a minimal app with SQLite
 wiki/                  documentation (synced to the GitHub wiki)
@@ -36,20 +35,28 @@ sign-in with other services) and their service definitions under
 
 ## Rules that are easy to break
 
-- **Dependencies point inward.** Plugins and adapters import the core; the
-  core never imports a plugin or adapter. Plugins never import each other;
-  they cooperate through hooks.
-- **Plugins write no SQL.** They declare tables in `Schema()` and use the
-  adapter. Anything an adapter must support goes into `adapter`, into every
-  adapter, and into `adaptertest` in the same change.
+- **Module path is `github.com/danielgtmn/sesam/v2`.** A breaking release
+  (`!`) that would tag v3 must change the path to `/v3` in the same PR,
+  else Go cannot import it.
+- **Dependencies point inward.** Plugins import the core; the core never
+  imports a plugin. Plugins never import each other; they cooperate
+  through hooks.
+- **Plugins write no SQL.** They declare their tables on `Auth.Store()` in
+  `Init` (ablage repositories, tables named `auth_<plugin>_…`, references to
+  users with `cascade`). What ablage lacks is added to ablage (its own PR,
+  release, then bump here), never worked around in sesam.
+- **Databases of earlier versions keep working.** Table and column names,
+  types and stored values of sesam 1.x stay readable; `internal/v1compat`
+  proves it on SQLite and Postgres. sesam's core tables keep references to
+  users without cascade (v1 tables have none), so `DeleteUser` removes
+  sessions, accounts and verifications itself.
 - **No database drivers in non-test code** of the module (examples aside).
   Apps bring their own driver and pass a `*sql.DB`.
-- **Migrations only add.** `Migrate` creates tables, nullable fields and
-  indexes. Never rename or drop a released field; a required field cannot be
-  added to an existing table.
-- **Inside `Adapter.Tx`, use the adapter passed to the function** and return
-  on the first error (Postgres aborts the transaction). With SQLite and one
-  connection, using the outer adapter there deadlocks.
+- **Migrations only add.** `Migrate` creates tables, fields and indexes.
+  Never rename or drop a released field.
+- **Inside `Store.Tx`, use the store passed to the function** (and
+  `repo.With(tx)`). With SQLite and one connection, or memory, using the
+  outer store there waits forever.
 - **Secrets** (passwords, session tokens, reset tokens) are never stored,
   logged or returned after creation; only hashes are stored (argon2id for
   passwords, SHA-256 for tokens). Error messages never reveal whether an
@@ -65,7 +72,7 @@ sign-in with other services) and their service definitions under
 ## Commands
 
 ```sh
-make test            # go vet + go test -race (memory and SQLite; Postgres tests skip)
+make test            # go vet + go test -race (memory and SQLite; Postgres tests skip), also internal/v1compat
 make postgres        # throwaway Postgres 18 in Docker on port 55432
 make test-postgres   # everything, including Postgres
 make postgres-stop
@@ -78,8 +85,8 @@ schema, which is dropped afterwards. CI runs them and fails if they skip.
 
 ## Done means tested
 
-Run `make test-postgres` for what you touched; new adapter behaviour gets a
-test in `adaptertest`, new endpoints a test with a real HTTP client (see
+Run `make test-postgres` for what you touched; new storage behaviour gets a
+test in ablage's `storetest`, new endpoints a test with a real HTTP client (see
 `plugins/password/http_test.go`). For changes that affect how an app uses
 sesam, run `examples/basic` and go through the flow with curl or a browser.
 If something could not be tested end to end, say so explicitly.

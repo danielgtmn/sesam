@@ -9,8 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/danielgtmn/sesam/adapter"
-	"github.com/danielgtmn/sesam/schema"
+	"github.com/danielgtmn/ablage"
 )
 
 // User is a person who can sign in. Email and Username are optional, but a
@@ -81,23 +80,31 @@ func normalizeName(s string) (string, error) {
 	return s, nil
 }
 
-func userFromRow(r adapter.Row) User {
+func (r userRow) user() User {
 	return User{
-		ID:            r.String("id"),
-		Email:         r.String("email"),
-		EmailVerified: r.Bool("email_verified"),
-		Username:      r.String("username"),
-		Name:          r.String("name"),
-		CreatedAt:     r.Time("created_at"),
-		UpdatedAt:     r.Time("updated_at"),
+		ID:            r.ID,
+		Email:         deref(r.Email),
+		EmailVerified: r.EmailVerified,
+		Username:      deref(r.Username),
+		Name:          r.Name,
+		CreatedAt:     r.CreatedAt,
+		UpdatedAt:     r.UpdatedAt,
 	}
 }
 
-func nullable(s string) any {
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// nullable stores "" as NULL.
+func nullable(s string) *string {
 	if s == "" {
 		return nil
 	}
-	return s
+	return &s
 }
 
 // CreateUser creates a user without any way to sign in; plugins add one
@@ -107,9 +114,10 @@ func (a *Auth) CreateUser(ctx context.Context, nu NewUser) (User, error) {
 }
 
 // CreateUserTx creates a user and runs fn in the same transaction, so a
-// plugin can add the user's account atomically. Hooks run before the
+// plugin can add the user's account atomically: inside fn, use tx (e.g.
+// a.Accounts().With(tx)), never the outer store. Hooks run before the
 // transaction starts and after it commits.
-func (a *Auth) CreateUserTx(ctx context.Context, nu NewUser, fn func(tx adapter.Adapter, u User) error) (User, error) {
+func (a *Auth) CreateUserTx(ctx context.Context, nu NewUser, fn func(tx ablage.Store, u User) error) (User, error) {
 	for _, h := range a.allHooks() {
 		if h.BeforeCreateUser != nil {
 			if err := h.BeforeCreateUser(ctx, &nu); err != nil {
@@ -134,15 +142,15 @@ func (a *Auth) CreateUserTx(ctx context.Context, nu NewUser, fn func(tx adapter.
 	if nu.Name, err = normalizeName(nu.Name); err != nil {
 		return User{}, err
 	}
-	now := adapter.NormalizeTime(a.Now())
+	now := ablage.NormalizeTime(a.Now())
 	u := User{
 		ID: NewID(), Email: nu.Email, EmailVerified: nu.EmailVerified && nu.Email != "",
 		Username: nu.Username, Name: nu.Name, CreatedAt: now, UpdatedAt: now,
 	}
-	err = a.db.Tx(ctx, func(tx adapter.Adapter) error {
-		if err := tx.Create(ctx, TableUsers, adapter.Row{
-			"id": u.ID, "email": nullable(u.Email), "email_verified": u.EmailVerified,
-			"username": nullable(u.Username), "name": u.Name, "created_at": now, "updated_at": now,
+	err = a.db.Tx(ctx, func(tx ablage.Store) error {
+		if err := a.r.users.With(tx).Create(ctx, &userRow{
+			ID: u.ID, Email: nullable(u.Email), EmailVerified: u.EmailVerified,
+			Username: nullable(u.Username), Name: u.Name, CreatedAt: now, UpdatedAt: now,
 		}); err != nil {
 			return err
 		}
@@ -162,39 +170,44 @@ func (a *Auth) CreateUserTx(ctx context.Context, nu NewUser, fn func(tx adapter.
 	return u, nil
 }
 
-// takenError turns a conflict into the error that says which value is
+// takenError turns a duplicate into the error that says which value is
 // taken. Other errors pass through.
 func (a *Auth) takenError(ctx context.Context, err error, email, username string) error {
-	if !errors.Is(err, adapter.ErrConflict) {
+	if !errors.Is(err, ablage.ErrDuplicate) {
 		return err
 	}
 	if email != "" {
-		if _, e := a.db.FindOne(ctx, TableUsers, adapter.Eq("email", email)); e == nil {
+		if ok, _ := a.exists(ctx, ablage.Eq("email", email)); ok {
 			return ErrEmailTaken
 		}
 	}
 	if username != "" {
-		if _, e := a.db.FindOne(ctx, TableUsers, adapter.Eq("username", username)); e == nil {
+		if ok, _ := a.exists(ctx, ablage.Eq("username", username)); ok {
 			return ErrUsernameTaken
 		}
 	}
 	return err
 }
 
-func (a *Auth) findUser(ctx context.Context, where adapter.Where) (User, error) {
-	r, err := a.db.FindOne(ctx, TableUsers, where)
-	if errors.Is(err, adapter.ErrNotFound) {
+func (a *Auth) exists(ctx context.Context, where ablage.Cond) (bool, error) {
+	n, err := a.r.users.Count(ctx, where)
+	return n > 0, err
+}
+
+func (a *Auth) findUser(ctx context.Context, where ablage.Cond) (User, error) {
+	r, err := a.r.users.First(ctx, ablage.Query{Where: where})
+	if errors.Is(err, ablage.ErrNotFound) {
 		return User{}, ErrNotFound
 	}
 	if err != nil {
 		return User{}, err
 	}
-	return userFromRow(r), nil
+	return r.user(), nil
 }
 
 // User returns the user with the given id, or ErrNotFound.
 func (a *Auth) User(ctx context.Context, id string) (User, error) {
-	return a.findUser(ctx, adapter.Eq("id", id))
+	return a.findUser(ctx, ablage.Eq("id", id))
 }
 
 // UserByEmail returns the user with the e-mail address, or ErrNotFound.
@@ -203,7 +216,7 @@ func (a *Auth) UserByEmail(ctx context.Context, email string) (User, error) {
 	if err != nil {
 		return User{}, ErrNotFound
 	}
-	return a.findUser(ctx, adapter.Eq("email", e))
+	return a.findUser(ctx, ablage.Eq("email", e))
 }
 
 // UserByUsername returns the user with the username, or ErrNotFound.
@@ -212,7 +225,7 @@ func (a *Auth) UserByUsername(ctx context.Context, username string) (User, error
 	if err != nil {
 		return User{}, ErrNotFound
 	}
-	return a.findUser(ctx, adapter.Eq("username", n))
+	return a.findUser(ctx, ablage.Eq("username", n))
 }
 
 // Users lists users, oldest first.
@@ -220,13 +233,15 @@ func (a *Auth) Users(ctx context.Context, o ListOptions) ([]User, error) {
 	if o.Limit <= 0 {
 		o.Limit = 100
 	}
-	rows, err := a.db.FindMany(ctx, TableUsers, adapter.Query{OrderBy: "created_at", Limit: o.Limit, Offset: o.Offset})
+	rows, err := a.r.users.Find(ctx, ablage.Query{
+		OrderBy: []ablage.Order{ablage.Asc("created_at")}, Limit: o.Limit, Offset: o.Offset,
+	})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]User, len(rows))
 	for i, r := range rows {
-		out[i] = userFromRow(r)
+		out[i] = r.user()
 	}
 	return out, nil
 }
@@ -234,7 +249,7 @@ func (a *Auth) Users(ctx context.Context, o ListOptions) ([]User, error) {
 // CountUsers returns the number of users, e.g. to find out whether an app
 // still needs its first account.
 func (a *Auth) CountUsers(ctx context.Context) (int64, error) {
-	return a.db.Count(ctx, TableUsers)
+	return a.r.users.Count(ctx, ablage.All)
 }
 
 // UpdateUser changes a user and returns the result.
@@ -243,7 +258,7 @@ func (a *Auth) UpdateUser(ctx context.Context, id string, up UserUpdate) (User, 
 	if err != nil {
 		return User{}, err
 	}
-	set := adapter.Row{}
+	set := ablage.Row{}
 	if up.Email != nil {
 		e := ""
 		if *up.Email != "" {
@@ -283,18 +298,22 @@ func (a *Auth) UpdateUser(ctx context.Context, id string, up UserUpdate) (User, 
 	if len(set) == 0 {
 		return u, nil
 	}
-	u.UpdatedAt = adapter.NormalizeTime(a.Now())
+	u.UpdatedAt = ablage.NormalizeTime(a.Now())
 	set["updated_at"] = u.UpdatedAt
-	if _, err := a.db.Update(ctx, TableUsers, set, adapter.Eq("id", id)); err != nil {
-		return User{}, a.takenError(ctx, err, stringIf(set, "email"), stringIf(set, "username"))
+	if err := a.r.users.Patch(ctx, id, set); err != nil {
+		if errors.Is(err, ablage.ErrNotFound) {
+			return User{}, ErrNotFound
+		}
+		return User{}, a.takenError(ctx, err, deref(stringIf(set, "email")), deref(stringIf(set, "username")))
 	}
 	return u, nil
 }
 
-func stringIf(r adapter.Row, k string) string { s, _ := r[k].(string); return s }
+func stringIf(r ablage.Row, k string) *string { s, _ := r[k].(*string); return s }
 
 // DeleteUser deletes a user with everything that refers to it: sessions,
-// accounts, and rows of plugin tables that reference the user.
+// accounts, one-time tokens, and rows of plugin tables whose reference to
+// users cascades.
 func (a *Auth) DeleteUser(ctx context.Context, id string) error {
 	u, err := a.User(ctx, id)
 	if err != nil {
@@ -307,48 +326,28 @@ func (a *Auth) DeleteUser(ctx context.Context, id string) error {
 			}
 		}
 	}
-	err = a.db.Tx(ctx, func(tx adapter.Adapter) error {
-		if err := a.deleteDependents(ctx, tx, TableUsers, []any{id}, 0); err != nil {
+	err = a.db.Tx(ctx, func(tx ablage.Store) error {
+		if _, err := a.r.sessions.With(tx).DeleteWhere(ctx, ablage.Eq("user_id", id)); err != nil {
+			return err
+		}
+		if _, err := a.r.accounts.With(tx).DeleteWhere(ctx, ablage.Eq("user_id", id)); err != nil {
 			return err
 		}
 		// Unlike sessions, verifications point at users by identifier.
-		if _, err := tx.Delete(ctx, TableVerifications, adapter.Eq("identifier", id)); err != nil {
+		if _, err := a.r.verifications.With(tx).DeleteWhere(ctx, ablage.Eq("identifier", id)); err != nil {
 			return err
 		}
-		_, err := tx.Delete(ctx, TableUsers, adapter.Eq("id", id))
-		return err
+		return a.r.users.With(tx).Delete(ctx, id)
 	})
+	if errors.Is(err, ablage.ErrNotFound) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
 	for _, h := range a.allHooks() {
 		if h.AfterDeleteUser != nil {
 			h.AfterDeleteUser(ctx, u)
-		}
-	}
-	return nil
-}
-
-// deleteDependents deletes, depth first, every row that references one of
-// ids in table.
-func (a *Auth) deleteDependents(ctx context.Context, tx adapter.Adapter, table string, ids []any, depth int) error {
-	if depth > 8 || len(ids) == 0 {
-		return nil
-	}
-	for _, d := range schema.Dependents(a.tables, table) {
-		rows, err := tx.FindMany(ctx, d.Table, adapter.Query{Where: []adapter.Where{adapter.In(d.Field, ids...)}})
-		if err != nil {
-			return err
-		}
-		child := make([]any, len(rows))
-		for i, r := range rows {
-			child[i] = r.String("id")
-		}
-		if err := a.deleteDependents(ctx, tx, d.Table, child, depth+1); err != nil {
-			return err
-		}
-		if _, err := tx.Delete(ctx, d.Table, adapter.In(d.Field, ids...)); err != nil {
-			return err
 		}
 	}
 	return nil

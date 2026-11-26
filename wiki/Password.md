@@ -1,6 +1,6 @@
 # Password
 
-`github.com/danielgtmn/sesam/plugins/password` lets people sign in with an e-mail address or a username and a password.
+`github.com/danielgtmn/sesam/v2/plugins/password` lets people sign in with an e-mail address or a username and a password.
 
 ```go
 pw := password.New(password.Options{
