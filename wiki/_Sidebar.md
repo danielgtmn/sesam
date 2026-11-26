@@ -16,7 +16,7 @@
 **Extending**
 
 - [[Writing Plugins|Writing-Plugins]]
-- [[Writing Adapters|Writing-Adapters]]
+- [[Upgrading to v2|Upgrading-to-v2]]
 
 **Background**
 

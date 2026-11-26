@@ -5,8 +5,7 @@ A plugin is a Go value that implements `sesam.Plugin`:
 ```go
 type Plugin interface {
     ID() string                 // unique, e.g. "twofactor"
-    Schema() []schema.Table     // tables it needs, or fields it adds to existing ones
-    Init(a *sesam.Auth) error   // keep a, register hooks
+    Init(a *sesam.Auth) error   // keep a, declare tables, register hooks
 }
 // optional:
 type RoutesPlugin interface {
@@ -19,40 +18,49 @@ The plugin value is its own Go API (`pw.SignIn(…)`), so apps get typed methods
 
 ## Declaring data
 
+Plugins keep their data with [ablage](https://github.com/danielgtmn/ablage) on the app's store (`a.Store()`). Declare the tables in `Init`, usually as a typed repository; `auth.Migrate` creates them.
+
 ```go
-func (p *Plugin) Schema() []schema.Table {
-    return []schema.Table{
-        {Name: "two_factor", Fields: []schema.Field{
-            {Name: "user_id", Type: schema.String, Required: true, Ref: &schema.Reference{Table: sesam.TableUsers}},
-            {Name: "secret", Type: schema.String, Required: true},
-            {Name: "enabled_at", Type: schema.Time},
-        }},
-        // adds a field to the users table
-        {Name: sesam.TableUsers, Fields: []schema.Field{{Name: "two_factor", Type: schema.Bool}}},
-    }
+type secret struct {
+    ID        string
+    UserID    string     `db:",ref=auth_users,cascade,unique"`
+    Secret    string
+    EnabledAt *time.Time // pointers are nullable
+}
+
+func (p *Plugin) Init(a *sesam.Auth) (err error) {
+    p.a = a
+    p.secrets, err = ablage.NewRepository[secret](a.Store(), "auth_two_factor")
+    return err
 }
 ```
 
-Every table has an implicit `id` (text). Types are `String`, `Int`, `Bool` and `Time`. Fields added to an existing table must not be `Required` (existing rows have no value). A field with `Ref` to `users` makes `DeleteUser` delete the rows with the user.
+- Name tables `auth_<plugin>_…`.
+- Reference users with `ref=auth_users,cascade`, so `DeleteUser` removes the plugin's rows with the user (in every store).
+- Plugins cannot add fields to sesam's tables; keep such data in a table of the plugin.
+- Tables only grow: a new field of an existing table gets its zero value in old rows (or NULL if it is a pointer). Never rename a field; keep the old column name with a `db` tag.
+
+See ablage's wiki for the struct mapping, conditions (`ablage.Eq`, `And`, `In`, `Prefix`, …) and errors (`ablage.ErrNotFound`, `ablage.ErrDuplicate`).
 
 ## Using data
 
 ```go
-db := a.Adapter()
-row, err := db.FindOne(ctx, "two_factor", adapter.Eq("user_id", u.ID))   // adapter.ErrNotFound
-err = db.Create(ctx, "two_factor", adapter.Row{"id": sesam.NewID(), "user_id": u.ID, "secret": s})
-n, err := db.Update(ctx, "two_factor", adapter.Row{"enabled_at": a.Now()}, adapter.Eq("user_id", u.ID))
-err = db.Tx(ctx, func(tx adapter.Adapter) error { … }) // use tx inside, return on the first error
+s, err := p.secrets.First(ctx, ablage.Query{Where: ablage.Eq("user_id", u.ID)}) // ablage.ErrNotFound
+err = p.secrets.Create(ctx, &secret{UserID: u.ID, Secret: x})                   // ablage.ErrDuplicate
+err = p.secrets.Patch(ctx, s.ID, ablage.Row{"enabled_at": a.Now()})
+err = a.Store().Tx(ctx, func(tx ablage.Store) error {                           // use tx inside, never the outer store
+    return p.secrets.With(tx).Delete(ctx, s.ID)
+})
 ```
-
-Conditions: `Eq`, `Ne` (nil tests for NULL), `Lt`, `Lte`, `Gt`, `Gte`, `In`, `Prefix`. `adapter.Incr(n)` in `Update` adds atomically. Unique violations are `adapter.ErrConflict`.
 
 ## What the core offers plugins
 
 | | |
 |---|---|
 | `a.SignIn(ctx, u, meta)` | Runs the sign-in hooks and creates the session; call it once the person proved who they are. |
-| `a.CreateUserTx(ctx, nu, fn)` | Creates a user and runs `fn` in the same transaction (e.g. to add an account). |
+| `a.CreateUserTx(ctx, nu, fn)` | Creates a user and runs `fn(tx, u)` in the same transaction (e.g. to add an account with `a.Accounts().With(tx)`). |
+| `a.Accounts()` | The repository of `sesam.Account`: ways to sign in, e.g. the password hash (provider `credential`). |
+| `a.Store()` | The store, for the plugin's own tables. |
 | `a.Limit(ctx, key, max, window)` / `a.UndoLimit` / `a.ResetLimit` | Stored attempt limits. `UndoLimit` takes back one attempt (a success that must not count), `ResetLimit` forgets them all. |
 | `a.CreateVerification` / `a.ConsumeVerification` | One-time tokens that work exactly once. |
 | `a.AddHooks(sesam.Hooks{…})` | E.g. `BeforeSignIn` to demand a second step. |

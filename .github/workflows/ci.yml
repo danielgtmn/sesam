@@ -62,7 +62,7 @@ jobs:
           fi
           has() { grep -qE "$1" <<<"$files" && echo true || echo false; }
           {
-            echo "go=$(has '(\.go$|^go\.(mod|sum)$)')"
+            echo "go=$(has '(\.go$|(^|/)go\.(mod|sum)$)')"
             echo "lint=$(has '(\.sh$|^\.github/workflows/)')"
           } | tee -a "$GITHUB_OUTPUT"
 
@@ -104,14 +104,21 @@ jobs:
             exit 1
           fi
       - name: Vet
-        run: go vet ./...
+        run: go vet ./... && (cd internal/v1compat && go vet ./...)
       - name: Test
+        run: go test -race -count=1 ./...
+      # Databases created by sesam 1.x keep working: a module of its own,
+      # so sesam/v2 does not depend on sesam v1.
+      - name: Test with databases of sesam 1.x
+        working-directory: internal/v1compat
         run: go test -race -count=1 ./...
       - name: Postgres tests ran
         # A missing database must fail the job, not skip the tests.
         run: |
           set -o pipefail
           go test -count=1 -run 'TestPostgres|TestHTTPFlow' -v ./... | tee /tmp/pg.log
+          (cd internal/v1compat && go test -count=1 -run 'TestV1Database' -v ./...) | tee -a /tmp/pg.log
+          grep -q -- '--- PASS: TestV1Database/Postgres' /tmp/pg.log
           ! grep -q -- '--- SKIP' /tmp/pg.log
 
   lint:

@@ -18,9 +18,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/danielgtmn/sesam"
-	"github.com/danielgtmn/sesam/adapters/sqladapter"
-	"github.com/danielgtmn/sesam/plugins/password"
+	"github.com/danielgtmn/ablage/sqlstore"
+
+	"github.com/danielgtmn/sesam/v2"
+	"github.com/danielgtmn/sesam/v2/plugins/password"
 )
 
 // logEmail prints mails instead of sending them. A real app delivers them
@@ -39,7 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store, err := sqladapter.New(db, sqladapter.SQLite)
+	store, err := sqlstore.New(db, sqlstore.SQLite)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func main() {
 	pw := password.New(password.Options{
 		ResetURL: func(token string) string { return base + "/reset?token=" + token },
 	})
-	auth, err := sesam.New(sesam.Config{Adapter: store, BaseURL: base, SendEmail: logEmail, Plugins: []sesam.Plugin{pw}})
+	auth, err := sesam.New(sesam.Config{Store: store, BaseURL: base, SendEmail: logEmail, Plugins: []sesam.Plugin{pw}})
 	if err != nil {
 		log.Fatal(err)
 	}

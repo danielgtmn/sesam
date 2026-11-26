@@ -5,7 +5,7 @@ Thanks for helping. sesam is a small project, so a short heads-up before larger 
 ## Before you start
 
 - **Questions and ideas:** [Discussions](https://github.com/danielgtmn/sesam/discussions).
-- **Bugs and concrete features:** [issues](https://github.com/danielgtmn/sesam/issues/new/choose). For anything bigger than a small fix, and for every new plugin or adapter, comment on the issue (or open one) first, so we can agree on the approach.
+- **Bugs and concrete features:** [issues](https://github.com/danielgtmn/sesam/issues/new/choose). For anything bigger than a small fix, and for every new plugin, comment on the issue (or open one) first, so we can agree on the approach.
 - **Security problems:** never in public, see [SECURITY.md](SECURITY.md).
 
 ## Setting up
@@ -22,7 +22,7 @@ make test-postgres   # all databases
 
 1. Fork, then branch from `main`.
 2. Read [AGENTS.md](AGENTS.md): layout, the rules that are easy to break (dependencies point inward, plugins write no SQL, migrations only add, secrets never stored or logged), and the commands.
-3. Add tests with the change. Adapter behaviour goes into `adapters/adaptertest`, so every adapter is held to it. Update the documentation in `wiki/` (and the README, where it covers the same thing) in the same pull request.
+3. Add tests with the change. Storage behaviour belongs in [ablage](https://github.com/danielgtmn/ablage) and its conformance suite, not in sesam. Update the documentation in `wiki/` (and the README, where it covers the same thing) in the same pull request.
 4. Run `make test-postgres` and `make lint`.
 5. **Try it for real.** For changes to endpoints, cookies or sessions, run `examples/basic` and go through the flow. If something could not be tested end to end, say so in the pull request.
 

@@ -7,11 +7,11 @@ for Go.
 
 ```go
 db, _ := sql.Open("sqlite", "app.db?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_txlock=immediate")
-store, _ := sqladapter.New(db, sqladapter.SQLite)
+store, _ := sqlstore.New(db, sqlstore.SQLite) // github.com/danielgtmn/ablage
 
 pw := password.New(password.Options{})
 auth, err := sesam.New(sesam.Config{
-    Adapter: store,
+    Store:   store,
     BaseURL: "https://app.example.com",
     Plugins: []sesam.Plugin{pw},
 })
@@ -28,8 +28,8 @@ if cur, ok := sesam.FromContext(r.Context()); ok {
 
 ## Status
 
-**Early.** The core, the SQL adapter for SQLite and Postgres and the
-password plugin work and are tested on all databases. The API may still
+**Early.** The core and the password plugin work and are tested on SQLite,
+Postgres and memory. The API may still
 change before 1.0. Two-factor sign-in, passkeys, organizations and sign-in
 with other services are planned (see the [roadmap](https://github.com/danielgtmn/sesam/wiki/Roadmap)).
 
@@ -46,9 +46,10 @@ with other services are planned (see the [roadmap](https://github.com/danielgtmn
 - **Protection against other sites:** changing requests must come from your
   origin or ones you trust, optionally with a header of your choice.
 - **Your database:** SQLite or Postgres through `database/sql`, with the
-  driver you already use. Tables get a prefix (`auth_users`, …) and are
-  created by `Migrate`, which only ever adds. Or print the SQL with `DDL()`
-  and run it with your own migrations.
+  driver you already use, via [ablage](https://github.com/danielgtmn/ablage).
+  Tables are named `auth_users`, … and created by `Migrate`, which only
+  ever adds. Or print the SQL with `DDL()` and run it with your own
+  migrations.
 - **Plugins and hooks:** plugins declare their tables and add endpoints;
   hooks let the app react to or refuse sign-ups, sign-ins and deletions.
 
@@ -56,12 +57,13 @@ with other services are planned (see the [roadmap](https://github.com/danielgtmn
 
 | Package | What it is |
 |---|---|
-| `github.com/danielgtmn/sesam` | the core |
-| `…/plugins/password` | e-mail or username and password |
-| `…/adapters/sqladapter` | SQLite and Postgres |
-| `…/adapters/memadapter` | in memory, for tests |
-| `…/adapters/adaptertest` | conformance tests for adapters |
-| `…/schema`, `…/adapter` | for writing plugins and adapters |
+| `github.com/danielgtmn/sesam/v2` | the core |
+| `…/v2/plugins/password` | e-mail or username and password |
+| `github.com/danielgtmn/ablage/sqlstore` | SQLite and Postgres |
+| `github.com/danielgtmn/ablage/memstore` | in memory, for tests |
+
+Coming from v1: see [Upgrading to v2](https://github.com/danielgtmn/sesam/wiki/Upgrading-to-v2);
+databases created by v1 keep working.
 
 ## Documentation
 

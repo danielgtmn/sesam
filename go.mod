@@ -1,4 +1,4 @@
-module github.com/danielgtmn/sesam
+module github.com/danielgtmn/sesam/v2
 
 go 1.26.0
 
@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/danielgtmn/ablage v0.2.0
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
