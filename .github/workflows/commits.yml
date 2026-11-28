@@ -3,11 +3,10 @@
 # "commits" is a required status check in the branch rules; renaming it means
 # updating the rules as well.
 #
-# Stable versions are computed from the commit messages on release (see
-# release.yml), and pull requests are merged with merge commits, so every
-# commit of a pull request into main must follow the format too. Pull requests
-# into release only warn (they carry older history) and report which release
-# the merge will make.
+# Release versions are computed from the commit messages (see release.yml),
+# and pull requests are merged with merge commits, so every commit of a pull
+# request must follow the format too. The check reports the highest change
+# level, which is what the next release makes of it.
 #
 # A separate workflow from ci.yml so that editing a title re-runs only this
 # check. Merge queue runs skip it (a skipped job counts as passed).
@@ -51,7 +50,6 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.base_ref }}
         run: |
           rank() { case $1 in major) echo 3 ;; minor) echo 2 ;; patch) echo 1 ;; *) echo 0 ;; esac; }
           highest=none
@@ -61,19 +59,10 @@ jobs:
             if level=$(scripts/commit-type.sh "$subject" "$(git log -1 --format=%b "$sha")" 2>/dev/null); then
               echo "${sha::7} $level  $subject"
               if [ "$(rank "$level")" -gt "$(rank "$highest")" ]; then highest=$level; fi
-            elif [ "$BASE_REF" = release ]; then
-              echo "::warning title=Commit ${sha::7}::\"$subject\" does not follow Conventional Commits and does not count for the version."
             else
               echo "::error title=Commit ${sha::7}::\"$subject\" does not follow Conventional Commits. Reword it (git rebase -i) to e.g. \"fix(password): keep the session on change\"."
               bad=1
             fi
           done < <(git rev-list --no-merges "$BASE..$HEAD")
-          if [ "$BASE_REF" = release ] && [ "$highest" = none ]; then
-            msg="Merging this pull request releases nothing: no feat:, fix: or perf: commits."
-          elif [ "$BASE_REF" = release ]; then
-            msg="Merging this pull request makes a $highest release."
-          else
-            msg="Highest change level of these commits: $highest."
-          fi
-          echo "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Highest change level of these commits: $highest." | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$bad"

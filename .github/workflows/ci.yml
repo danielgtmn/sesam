@@ -3,7 +3,7 @@
 # rules as well.
 #
 # On pull requests, jobs run only when files they check changed (a skipped
-# job counts as passed for the branch rules). Pushes to main and release,
+# job counts as passed for the branch rules). Pushes to main,
 # the merge queue and manual runs always run everything. The pull request
 # title check ("commits") is in commits.yml.
 name: CI
@@ -11,7 +11,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, release]
+    branches: [main]
   merge_group:
   workflow_dispatch:
 

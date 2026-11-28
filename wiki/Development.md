@@ -33,7 +33,9 @@ See [AGENTS.md](https://github.com/danielgtmn/sesam/blob/main/AGENTS.md). In sho
 
 ## Releases
 
-A Go module is released by its tag. To release, open a pull request `main → release` and merge it with a merge commit. The `Release` workflow computes the next version from the commits since the last `v*` tag (`fix:`/`perf:` patch, `feat:` minor, `!` or `BREAKING CHANGE:` major), pushes the tag and publishes a GitHub release with notes. Without `feat:`, `fix:` or `perf:` commits nothing is released.
+A Go module is released by its tag. A release is made by hand from `main`: in the Actions tab, run **Release** (or `gh workflow run release.yml --ref main`). The workflow computes the next version from the commits since the last `v*` tag (`fix:`/`perf:` patch, `feat:` minor, `!` or `BREAKING CHANGE:` major), pushes the tag on `main`'s head and publishes a GitHub release with notes. Without `feat:`, `fix:` or `perf:` commits nothing is released. There is no release branch.
+
+A Go version is just a git tag, and the Go module proxy keeps every version it has seen for good: a published version cannot be changed or deleted, only marked as retracted in `go.mod`. So release on purpose, when `main` is in a state worth keeping.
 
 Between releases, apps can use `go get github.com/danielgtmn/sesam/v2@main`. The module path carries the major version (`/v2`); a release with `!` that would make v3 must change it to `/v3` in the same pull request.
 
