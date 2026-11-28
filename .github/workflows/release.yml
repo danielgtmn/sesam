@@ -1,25 +1,25 @@
 # Releases sesam. A Go module is released by its git tag: once v1.2.3 is
-# pushed, `go get github.com/danielgtmn/sesam@v1.2.3` works. There are no
-# archives to build.
+# pushed, `go get github.com/danielgtmn/sesam/v2@v2.1.0` works. There are no
+# archives to build and nothing to upload; the Go module proxy fetches the
+# tagged commit on first use and keeps it for good, so a published version
+# can never be changed or deleted (only retracted in go.mod).
 #
-# Stable releases are made from the long-lived branch release: merge a pull
-# request main -> release (merge commit). The tag job computes the next
-# version from the Conventional Commits since the last v* tag (fix:/perf:
-# patch, feat: minor, feat!: or BREAKING CHANGE: major), pushes the tag
-# v<version>, and the release job publishes a GitHub release with notes
-# listing the merged pull requests. A push without such commits releases
-# nothing.
+# Releases are made by hand from main: Actions -> Release -> Run workflow
+# (or `gh workflow run release.yml --ref main`). The tag job computes the
+# next version from the Conventional Commits since the last v* tag
+# (fix:/perf: patch, feat: minor, feat!: or BREAKING CHANGE: major), pushes
+# the tag v<version> on main's head, and the release job publishes a GitHub
+# release with notes listing the merged pull requests. A run without such
+# commits releases nothing.
 #
 # Between releases, apps can use main directly:
-# `go get github.com/danielgtmn/sesam@main` (a pseudo-version).
+# `go get github.com/danielgtmn/sesam/v2@main` (a pseudo-version).
 #
 # If the release job fails after the tag was pushed, use "Re-run failed
 # jobs": re-running the tag job finds the tag already there.
 name: Release
 
 on:
-  push:
-    branches: [release]
   workflow_dispatch:
 
 permissions:
@@ -31,9 +31,9 @@ concurrency:
 
 jobs:
   tag:
-    # A manual run can pick any branch; only release has passed review and
-    # the required checks, so only release may be tagged.
-    if: github.ref == 'refs/heads/release'
+    # A manual run can pick any branch; only main has passed review and the
+    # required checks, so only main may be tagged.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
